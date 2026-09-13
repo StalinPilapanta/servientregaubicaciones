@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.DS_Store
+*.pdf
+*.csv
+*.txt
+listadoAgencias.py
+limpiar_directorio.py
+README_DESPLIEGUE.md
