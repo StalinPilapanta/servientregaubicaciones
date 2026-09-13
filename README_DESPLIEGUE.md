@@ -67,30 +67,87 @@ En la config de la aplicacion en Coolify, usa como health check path:
 /salud
 ```
 
+## URL de produccion
+
+El servicio esta desplegado en:
+
+```
+https://servientrega.neolabsgroup.io
+```
+
+Prueba rapida:
+```bash
+curl "https://servientrega.neolabsgroup.io/salud"
+# -> {"ok": true, "agencias": 738}
+```
+
 ## Conectar con el flujo del bot en Chatea Pro
 
-En el flujo donde pides la direccion de envio, agrega una accion
-**External Request (Peticion externa)**:
+La conexion se hace en la interfaz de Chatea Pro (constructor de flujos), no por
+la API/MCP. Pasos:
 
-- **Metodo:** `GET`
-- **URL:**
+### 1. Capturar la direccion del cliente
+En el flujo, usa una accion de pregunta ("Hacer una pregunta") y guarda la
+respuesta en un **campo de usuario**, por ejemplo `direccion_cliente`.
+
+### 2. Agregar accion "Peticion Externa" (External Request)
+
+**Opcion A - GET (mas simple):**
+- Metodo: `GET`
+- URL:
   ```
-  https://servientrega.tudominio.com/buscar?texto={{VARIABLE_CON_LA_DIRECCION}}
-  ```
-  Reemplaza `{{VARIABLE_CON_LA_DIRECCION}}` por la variable de Chatea Pro que
-  guarda lo que escribio el cliente (ej. la respuesta de "¿A que direccion
-  enviamos?").
-- **Guardar respuesta:** guarda el JSON en una variable, por ejemplo
-  `resp_servientrega`.
-- **Responder al cliente:** muestra el campo `mensaje`:
-  ```
-  {{resp_servientrega.mensaje}}
+  https://servientrega.neolabsgroup.io/buscar?texto={{direccion_cliente}}
   ```
 
-Tambien puedes usar los campos individuales para armar el pedido, por ejemplo:
+**Opcion B - POST (mas robusto, recomendado):**
+- Metodo: `POST`
+- URL: `https://servientrega.neolabsgroup.io/buscar`
+- Header: `Content-Type: application/json`
+- Body (JSON):
+  ```json
+  { "texto": "{{direccion_cliente}}" }
+  ```
+
+### 3. Guardar la respuesta
+Guarda el JSON de respuesta en una variable, por ejemplo `resp_servientrega`.
+La respuesta tiene esta forma:
+```json
+{
+  "ciudad_detectada": "suscal",
+  "resultados": [
+    {
+      "nombre": "SUSCAL_ALFONSO TERAN",
+      "provincia": "CANAR",
+      "ciudad": "SUSCAL",
+      "sector": "SUR",
+      "direccion": "CALLE ALFONSO TERAN S/N Y JUAN JARAMILLO ...",
+      "telefono": "0999745815",
+      "entrega_en_oficina": "SI",
+      "horario_lun_vie": "09H00 A 16H00",
+      "horario_fin_semana": "09H00 A 14H00",
+      "email": "csalfonsoteran.suscal@gmail.com"
+    }
+  ],
+  "mensaje": "Estas son las oficinas Servientrega mas cercanas: ..."
+}
+```
+
+### 4. Responder al cliente
+El campo `mensaje` ya viene listo para mostrar:
+```
+{{resp_servientrega.mensaje}}
+```
+
+Tambien puedes usar campos individuales para armar el pedido:
 `{{resp_servientrega.resultados[0].nombre}}`,
 `{{resp_servientrega.resultados[0].ciudad}}`,
-`{{resp_servientrega.resultados[0].direccion}}`.
+`{{resp_servientrega.resultados[0].provincia}}`,
+`{{resp_servientrega.resultados[0].direccion}}`,
+`{{resp_servientrega.resultados[0].telefono}}`.
+
+> Nota: la sintaxis exacta de las variables (`{{...}}`, `[0]`, `.0.`) puede
+> variar segun la version de Chatea Pro. Si el mapeo con indice no funciona,
+> usa el campo `mensaje` que siempre viene listo.
 
 ### Sobre las fotos
 
@@ -98,6 +155,22 @@ El servicio trabaja con texto. Cuando el cliente manda una **foto** de la
 direccion, el bot debe pedir que la escriba:
 "Para asignarte la oficina Servientrega, escribeme por favor tu ciudad y sector".
 Luego esa respuesta se envia al endpoint `/buscar`.
+
+## Pruebas manuales del endpoint
+
+```bash
+# Salud
+curl "https://servientrega.neolabsgroup.io/salud"
+
+# GET
+curl -G "https://servientrega.neolabsgroup.io/buscar" \
+  --data-urlencode "texto=estoy en Ambato sector Ficoa"
+
+# POST
+curl -X POST "https://servientrega.neolabsgroup.io/buscar" \
+  -H "Content-Type: application/json" \
+  -d '{"texto":"sur de Quito, Solanda"}'
+```
 
 ## Prueba local rapida
 
