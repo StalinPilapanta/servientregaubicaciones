@@ -1,9 +1,15 @@
 __pycache__/
 *.pyc
 .DS_Store
-*.pdf
-*.csv
-*.txt
+
+# Formatos de datos que el servicio NO usa (solo usa directorio_limpio.json).
+# Se listan por nombre para NO excluir requirements.txt ni otros .txt necesarios.
+directorio_servientrega.pdf
+directorio_servientrega.csv
+directorio_servientrega.txt
+
+# Scripts y docs que no van dentro del contenedor.
 listadoAgencias.py
 limpiar_directorio.py
+README.md
 README_DESPLIEGUE.md
