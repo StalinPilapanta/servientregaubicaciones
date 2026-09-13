@@ -7,6 +7,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# curl: necesario para el health check que Coolify ejecuta dentro del contenedor.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
 # Instalar dependencias primero (mejor cache de capas).
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
@@ -19,6 +24,10 @@ COPY directorio_servientrega.json ./
 
 # Puerto interno del contenedor.
 EXPOSE 8000
+
+# Health check propio del contenedor (usa curl instalado arriba).
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -fsS http://localhost:8000/salud || exit 1
 
 # Gunicorn sirve la app Flask "app" definida en servidor.py.
 # 2 workers es suficiente para este servicio liviano.
