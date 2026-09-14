@@ -17,6 +17,15 @@ import requests
 BASE_URL = os.environ.get("CHATEAPRO_API_URL", "https://chateapro.app/api")
 API_TOKEN = os.environ.get("CHATEAPRO_API_TOKEN", "")
 
+# Zona horaria de Ecuador (UTC-5). El servidor (Coolify) suele estar en UTC,
+# lo que hacia que "hoy" apuntara al dia equivocado.
+TZ_ECUADOR = dt.timezone(dt.timedelta(hours=-5))
+
+
+def hoy_ecuador():
+    """Fecha actual en Ecuador, sin importar la zona del servidor."""
+    return dt.datetime.now(TZ_ECUADOR).date()
+
 # Campos de usuario que nos interesan para el resumen del pedido.
 CAMPO_NOMBRE = "Nombre completo"
 CAMPO_FECHA = "Fecha de compra"
@@ -107,7 +116,7 @@ def ventas_del_dia(fecha=None):
     (por defecto hoy). Recorre los suscriptores recientes.
     """
     if fecha is None:
-        fecha = dt.date.today()
+        fecha = hoy_ecuador()
 
     ventas = []
     for s in listar_suscriptores_recientes():
@@ -141,7 +150,7 @@ def resumen_pedido(campos):
 def resumen_del_dia(fecha=None):
     """Arma el texto de estadisticas del dia (ventas, facturacion, top producto)."""
     if fecha is None:
-        fecha = dt.date.today()
+        fecha = hoy_ecuador()
     ventas = ventas_del_dia(fecha)
 
     total_ventas = len(ventas)

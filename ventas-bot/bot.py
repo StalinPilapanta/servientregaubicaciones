@@ -48,6 +48,31 @@ def autorizado(chat_id):
     return str(chat_id) in ALLOWED
 
 
+def _parse_arg_fecha(texto):
+    """
+    Extrae una fecha del comando: 'ayer' o 'dd/mm/aaaa'.
+    Si no hay argumento, devuelve None (=> hoy en Ecuador).
+    """
+    import re
+    import datetime as dt
+    partes = texto.split(maxsplit=1)
+    if len(partes) < 2:
+        return None
+    arg = partes[1].strip().lower()
+    if arg == "ayer":
+        return chateapro.hoy_ecuador() - dt.timedelta(days=1)
+    if arg in ("hoy", ""):
+        return None
+    m = re.search(r"(\d{1,2})/(\d{1,2})/(\d{4})", arg)
+    if m:
+        d, mo, y = map(int, m.groups())
+        try:
+            return dt.date(y, mo, d)
+        except ValueError:
+            return None
+    return None
+
+
 def manejar_comando(chat_id, texto):
     texto = (texto or "").strip()
     cmd = texto.split()[0].lower() if texto else ""
@@ -56,31 +81,39 @@ def manejar_comando(chat_id, texto):
         enviar(chat_id,
                "👋 *Bot de ventas VitashopEc*\n\n"
                "Comandos disponibles:\n"
-               "• /resumen — ventas del día\n"
-               "• /ventas — lista de pedidos de hoy\n"
+               "• /resumen — ventas de hoy\n"
+               "• /resumen ayer — ventas de ayer\n"
+               "• /resumen 13/09/2026 — ventas de una fecha\n"
+               "• /ventas — lista de pedidos de hoy (con teléfono)\n"
+               "• /ventas ayer — pedidos de ayer\n"
                "• /pedido <teléfono> — datos de envío de un cliente")
         return
 
     if cmd == "/resumen":
-        enviar(chat_id, "⏳ Calculando resumen del día...")
+        fecha = _parse_arg_fecha(texto)
+        enviar(chat_id, "⏳ Calculando resumen...")
         try:
-            enviar(chat_id, chateapro.resumen_del_dia())
+            enviar(chat_id, chateapro.resumen_del_dia(fecha))
         except Exception as e:
             enviar(chat_id, f"❌ Error al obtener el resumen: {e}")
         return
 
     if cmd == "/ventas":
-        enviar(chat_id, "⏳ Buscando pedidos de hoy...")
+        fecha = _parse_arg_fecha(texto)
+        enviar(chat_id, "⏳ Buscando pedidos...")
         try:
-            ventas = chateapro.ventas_del_dia()
+            ventas = chateapro.ventas_del_dia(fecha)
             if not ventas:
                 enviar(chat_id, "No hay ventas registradas hoy todavía.")
                 return
             lineas = [f"🧾 *Pedidos de hoy ({len(ventas)})*\n"]
             for i, v in enumerate(ventas, 1):
                 nombre = v.get(chateapro.CAMPO_NOMBRE) or v.get("_name") or "-"
+                tel = v.get("_phone", "-")
                 lineas.append(
-                    f"{i}. {nombre} — {v.get(chateapro.CAMPO_CIUDAD, '-')} — "
+                    f"{i}. {nombre}\n"
+                    f"   📲 {tel}\n"
+                    f"   📍 {v.get(chateapro.CAMPO_CIUDAD, '-')} — "
                     f"${v.get(chateapro.CAMPO_VALOR, '-')} — "
                     f"{v.get(chateapro.CAMPO_PRODUCTOS, '-')}"
                 )
