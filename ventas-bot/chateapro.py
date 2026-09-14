@@ -65,6 +65,23 @@ def listar_suscriptores_recientes(limit=100):
     return data.get("data", [])
 
 
+def listar_todos_suscriptores(max_paginas=10):
+    """
+    Devuelve TODOS los suscriptores (paginando de a 100).
+    Se usa para consultar ventas de fechas pasadas (mas alla de 24h).
+    max_paginas limita el recorrido para no tardar demasiado.
+    """
+    todos = []
+    for page in range(1, max_paginas + 1):
+        data = _get("/subscribers", {"limit": 100, "page": page})
+        items = data.get("data", [])
+        todos.extend(items)
+        meta = data.get("meta") or {}
+        if page >= (meta.get("last_page") or 1):
+            break
+    return todos
+
+
 def obtener_campos(user_ns):
     """Devuelve un dict {nombre_campo: valor} de un suscriptor."""
     data = _get("/subscriber/get-info", {"user_ns": user_ns}).get("data", {})
@@ -118,8 +135,15 @@ def ventas_del_dia(fecha=None):
     if fecha is None:
         fecha = hoy_ecuador()
 
+    # Para "hoy" basta con los recientes (rapido). Para fechas pasadas,
+    # hay que recorrer todos los suscriptores (mas lento pero completo).
+    if fecha == hoy_ecuador():
+        suscriptores = listar_suscriptores_recientes()
+    else:
+        suscriptores = listar_todos_suscriptores()
+
     ventas = []
-    for s in listar_suscriptores_recientes():
+    for s in suscriptores:
         campos = obtener_campos(s["user_ns"])
         if not es_venta(campos):
             continue

@@ -153,22 +153,64 @@ def manejar_comando(chat_id, texto):
     enviar(chat_id, "No reconozco ese comando. Usa /ayuda para ver las opciones.")
 
 
+# --- Notificacion automatica de ventas nuevas ---
+
+# Cada cuantos segundos revisar si hay ventas nuevas.
+INTERVALO_CHECK = int(os.environ.get("CHECK_INTERVAL_SECONDS", "120"))
+# Activar/desactivar la notificacion automatica.
+NOTIFICAR = os.environ.get("NOTIFICAR_VENTAS", "true").lower() == "true"
+
+# Recuerda que ventas ya se notificaron (por user_ns) para no repetir.
+_ya_notificadas = set()
+_ultimo_check = 0
+_primera_pasada = True
+
+
+def revisar_ventas_nuevas():
+    """Detecta ventas de hoy no notificadas y las envia a los chats permitidos."""
+    global _primera_pasada
+    try:
+        ventas = chateapro.ventas_del_dia()  # hoy
+    except Exception as e:
+        print("Error revisando ventas:", e)
+        return
+
+    nuevas = [v for v in ventas if v.get("_user_ns") not in _ya_notificadas]
+
+    # En la PRIMERA pasada solo marcamos las existentes (no notificar el historial).
+    if _primera_pasada:
+        for v in ventas:
+            _ya_notificadas.add(v.get("_user_ns"))
+        _primera_pasada = False
+        return
+
+    for v in nuevas:
+        _ya_notificadas.add(v.get("_user_ns"))
+        texto = "🔔 *NUEVA VENTA*\n\n" + chateapro.resumen_pedido(v)
+        for chat_id in ALLOWED:
+            enviar(chat_id, texto)
+
+
 def main():
     if not TG_TOKEN:
         raise SystemExit("Falta TELEGRAM_BOT_TOKEN")
     print("Bot de ventas iniciado. Escuchando mensajes...")
+    if NOTIFICAR:
+        print(f"Notificacion automatica ACTIVA (cada {INTERVALO_CHECK}s).")
 
+    global _ultimo_check
     offset = None
     while True:
+        # 1) Revisar mensajes entrantes (comandos) con timeout corto.
         try:
             resp = requests.get(f"{TG_API}/getUpdates", params={
-                "timeout": 30,
+                "timeout": 10,
                 "offset": offset,
-            }, timeout=40).json()
+            }, timeout=20).json()
         except Exception as e:
             print("Error getUpdates:", e)
             time.sleep(5)
-            continue
+            resp = {}
 
         for u in resp.get("result", []):
             offset = u["update_id"] + 1
@@ -181,6 +223,11 @@ def main():
                 enviar(chat_id, "🚫 No autorizado.")
                 continue
             manejar_comando(chat_id, texto)
+
+        # 2) Revisar ventas nuevas cada INTERVALO_CHECK segundos.
+        if NOTIFICAR and (time.time() - _ultimo_check) >= INTERVALO_CHECK:
+            _ultimo_check = time.time()
+            revisar_ventas_nuevas()
 
 
 if __name__ == "__main__":
