@@ -5,6 +5,7 @@ Comandos:
   /start    -> mensaje de bienvenida
   /resumen  -> estadisticas de ventas del dia (ventas, facturacion, top producto)
   /ventas   -> lista de pedidos del dia (nombre, ciudad, valor)
+  /pendientes -> pedidos del dia cuyo Resumen menciona 'pendiente'
   /pedido <telefono>  -> "Resumen del pedido - Datos de envio" de un cliente
 
 Usa long polling (getUpdates), asi que NO necesita webhook ni dominio publico.
@@ -82,10 +83,10 @@ def manejar_comando(chat_id, texto):
                "👋 *Bot de ventas VitashopEc*\n\n"
                "Comandos disponibles:\n"
                "• /resumen — ventas de hoy\n"
-               "• /resumen ayer — ventas de ayer\n"
-               "• /resumen 13/09/2026 — ventas de una fecha\n"
-               "• /ventas — lista de pedidos de hoy (con teléfono)\n"
-               "• /ventas ayer — pedidos de ayer\n"
+               "• /resumen dd/mm/aaaa — ventas de una fecha\n"
+               "• /ventas — lista de pedidos\n"
+               "• /ventas dd/mm/aaaa — pedidos por fecha\n"
+               "• /pendientes — pedidos pendientes\n"
                "• /pedido <teléfono> — datos de envío de un cliente")
         return
 
@@ -150,6 +151,31 @@ def manejar_comando(chat_id, texto):
             enviar(chat_id, f"❌ Error al buscar el pedido: {e}")
         return
 
+    if cmd == "/pendientes":
+        fecha = _parse_arg_fecha(texto)
+        enviar(chat_id, "⏳ Buscando pedidos pendientes...")
+        try:
+            pendientes = chateapro.pendientes_del_dia(fecha)
+            if not pendientes:
+                enviar(chat_id,
+                       "✅ No hay pedidos pendientes "
+                       "(ninguna venta con 'pendiente' en el Resumen).")
+                return
+            f_str = (fecha or chateapro.hoy_ecuador()).strftime("%d/%m/%Y")
+            lineas = [f"⏳ *Pedidos pendientes del {f_str} ({len(pendientes)})*\n"]
+            for i, v in enumerate(pendientes, 1):
+                nombre = v.get(chateapro.CAMPO_NOMBRE) or v.get("_name") or "-"
+                lineas.append(
+                    f"{i}. {nombre}\n"
+                    f"   📲 {v.get('_phone', '-')}\n"
+                    f"   📍 {v.get(chateapro.CAMPO_CIUDAD, '-')} — "
+                    f"${v.get(chateapro.CAMPO_VALOR, '-')}"
+                )
+            enviar(chat_id, "\n".join(lineas))
+        except Exception as e:
+            enviar(chat_id, f"❌ Error al listar pendientes: {e}")
+        return
+
     enviar(chat_id, "No reconozco ese comando. Usa /ayuda para ver las opciones.")
 
 
@@ -162,33 +188,62 @@ NOTIFICAR = os.environ.get("NOTIFICAR_VENTAS", "true").lower() == "true"
 
 # Recuerda que ventas ya se notificaron (por user_ns) para no repetir.
 _ya_notificadas = set()
+# Controla cada cuanto se re-consulta a un suscriptor que NO ha comprado.
+# Evita refetchear a todo el listado en cada ciclo (saturacion del API).
+_ultima_revision = {}
 _ultimo_check = 0
 _primera_pasada = True
 
+# Cada cuantos segundos se vuelve a revisar a un suscriptor aun sin compra.
+REVISAR_NUEVOS_INTERVALO = int(
+    os.environ.get("REVISAR_NUEVOS_INTERVAL_SECONDS", "1800")
+)
+
 
 def revisar_ventas_nuevas():
-    """Detecta ventas de hoy no notificadas y las envia a los chats permitidos."""
+    """
+    Detecta ventas de hoy no notificadas y las envia a los chats permitidos.
+
+    Para no saturar la API:
+      - solo hace 1 request para listar suscriptores recientes por ciclo,
+      - consulta los campos de un suscriptor que aun no compra como maximo cada
+        REVISAR_NUEVOS_INTERVALO segundos (30 min por defecto),
+      - los campos se leen de la cache de chateapro.py.
+    """
     global _primera_pasada
     try:
-        ventas = chateapro.ventas_del_dia()  # hoy
+        suscriptores = chateapro.listar_suscriptores_recientes()
     except Exception as e:
         print("Error revisando ventas:", e)
         return
 
-    nuevas = [v for v in ventas if v.get("_user_ns") not in _ya_notificadas]
+    hoy = chateapro.hoy_ecuador()
+    ahora = time.time()
 
-    # En la PRIMERA pasada solo marcamos las existentes (no notificar el historial).
-    if _primera_pasada:
-        for v in ventas:
-            _ya_notificadas.add(v.get("_user_ns"))
-        _primera_pasada = False
-        return
-
-    for v in nuevas:
-        _ya_notificadas.add(v.get("_user_ns"))
-        texto = "🔔 *NUEVA VENTA*\n\n" + chateapro.resumen_pedido(v)
+    for s in suscriptores:
+        ns = s.get("user_ns")
+        if not ns or ns in _ya_notificadas:
+            continue
+        # Aun no ha comprado: no re-consultarlo tan seguido.
+        if not _primera_pasada and (ahora - _ultima_revision.get(ns, 0)) < REVISAR_NUEVOS_INTERVALO:
+            continue
+        _ultima_revision[ns] = ahora
+        try:
+            campos = chateapro.obtener_campos(ns)  # cacheado
+        except Exception as e:
+            print(f"Error obteniendo campos de {ns}: {e}")
+            continue
+        if not chateapro.es_venta_de_fecha(campos, hoy):
+            continue
+        _ya_notificadas.add(ns)
+        # En la PRIMERA pasada solo marcamos (no notificar el historial).
+        if _primera_pasada:
+            continue
+        texto = chateapro.resumen_venta_nueva(campos)
         for chat_id in ALLOWED:
             enviar(chat_id, texto)
+
+    _primera_pasada = False
 
 
 def main():

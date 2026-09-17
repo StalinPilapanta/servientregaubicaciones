@@ -10,6 +10,7 @@ es "true" (o tiene Fecha de compra con valor).
 
 import os
 import re
+import time
 import datetime as dt
 
 import requests
@@ -20,6 +21,12 @@ API_TOKEN = os.environ.get("CHATEAPRO_API_TOKEN", "")
 # Zona horaria de Ecuador (UTC-5). El servidor (Coolify) suele estar en UTC,
 # lo que hacia que "hoy" apuntara al dia equivocado.
 TZ_ECUADOR = dt.timezone(dt.timedelta(hours=-5))
+
+# Cache en memoria de los campos de cada suscriptor: evita disparar una
+# peticion /subscriber/get-info por cada suscriptor en cada ciclo de revision.
+# El TTL es configurable (por defecto 5 min).
+_CACHE = {}
+CACHE_TTL = int(os.environ.get("CHATEAPRO_CACHE_TTL_SECONDS", "300"))
 
 
 def hoy_ecuador():
@@ -83,7 +90,12 @@ def listar_todos_suscriptores(max_paginas=10):
 
 
 def obtener_campos(user_ns):
-    """Devuelve un dict {nombre_campo: valor} de un suscriptor."""
+    """Devuelve un dict {nombre_campo: valor} de un suscriptor (con cache)."""
+    ahora = time.time()
+    cacheado = _CACHE.get(user_ns)
+    if cacheado and (ahora - cacheado["ts"]) < CACHE_TTL:
+        return cacheado["campos"]
+
     data = _get("/subscriber/get-info", {"user_ns": user_ns}).get("data", {})
     campos = {}
     for f in data.get("user_fields") or []:
@@ -92,6 +104,8 @@ def obtener_campos(user_ns):
     campos["_name"] = data.get("name") or ""
     campos["_phone"] = data.get("phone") or ""
     campos["_user_ns"] = user_ns
+
+    _CACHE[user_ns] = {"campos": campos, "ts": ahora}
     return campos
 
 
@@ -111,11 +125,45 @@ def _parse_fecha_compra(valor):
         return None
 
 
+def _parse_fecha_compra_dt(valor):
+    """
+    Convierte 'Fecha de compra' (ej '13/09/2026 10:16 pm') a datetime completo,
+    o None si no se puede. Se usa para ordenar las ventas de la mas antigua a la
+    mas nueva.
+    """
+    fecha = _parse_fecha_compra(valor)
+    if not fecha:
+        return None
+    hm = re.search(r"(\d{1,2}):(\d{2})\s*(am|pm)?", valor, re.IGNORECASE)
+    hora = minuto = 0
+    if hm:
+        hora = int(hm.group(1))
+        minuto = int(hm.group(2))
+        sufijo = (hm.group(3) or "").lower()
+        if sufijo == "pm" and hora < 12:
+            hora += 12
+        elif sufijo == "am" and hora == 12:
+            hora = 0
+    try:
+        return dt.datetime(fecha.year, fecha.month, fecha.day, hora, minuto)
+    except ValueError:
+        return None
+
+
 def es_venta(campos):
     """True si el suscriptor concreto una compra."""
     if str(campos.get(CAMPO_COMPRA_OK, "")).strip().lower() == "true":
         return True
     return bool(str(campos.get(CAMPO_FECHA, "")).strip())
+
+
+def es_venta_de_fecha(campos, fecha=None):
+    """True si el suscriptor concreto una compra que cae en 'fecha' (hoy por defecto)."""
+    if fecha is None:
+        fecha = hoy_ecuador()
+    if not es_venta(campos):
+        return False
+    return _parse_fecha_compra(campos.get(CAMPO_FECHA, "")) == fecha
 
 
 def _valor_num(campos):
@@ -130,7 +178,8 @@ def _valor_num(campos):
 def ventas_del_dia(fecha=None):
     """
     Devuelve la lista de ventas (dicts de campos) cuya Fecha de compra es 'fecha'
-    (por defecto hoy). Recorre los suscriptores recientes.
+    (por defecto hoy). Recorre los suscriptores recientes. Los campos de cada
+    suscriptor se leen desde la cache para no golpear la API.
     """
     if fecha is None:
         fecha = hoy_ecuador()
@@ -145,11 +194,10 @@ def ventas_del_dia(fecha=None):
     ventas = []
     for s in suscriptores:
         campos = obtener_campos(s["user_ns"])
-        if not es_venta(campos):
-            continue
-        f = _parse_fecha_compra(campos.get(CAMPO_FECHA, ""))
-        if f == fecha:
+        if es_venta_de_fecha(campos, fecha):
             ventas.append(campos)
+    # Ordenar de la venta mas antigua a la mas nueva (por fecha+ hora de compra).
+    ventas.sort(key=lambda v: _parse_fecha_compra_dt(v.get(CAMPO_FECHA, "")) or dt.datetime.min)
     return ventas
 
 
@@ -169,6 +217,34 @@ def resumen_pedido(campos):
         f"📌 *Prob. recibir:* {campos.get(CAMPO_ENTREGA, '-')}\n"
         f"📄 *Resumen:* {campos.get(CAMPO_RESUMEN, '-')}"
     )
+
+
+def resumen_venta_nueva(campos):
+    """Texto corto y detallado para la notificacion de una venta nueva."""
+    nombre = campos.get(CAMPO_NOMBRE) or campos.get("_name") or "-"
+    return (
+        "🔔 *NUEVA VENTA*\n\n"
+        f"👤 *{nombre}*\n"
+        f"📲 {campos.get('_phone', '-')}\n"
+        f"🛍️ {campos.get(CAMPO_PRODUCTOS, '-')}\n"
+        f"💵 ${campos.get(CAMPO_VALOR, '-')}\n"
+        f"📍 {campos.get(CAMPO_CIUDAD, '-')}\n"
+        f"📌 Prob. recibir: {campos.get(CAMPO_ENTREGA, '-')}"
+    )
+
+
+def pendientes_del_dia(fecha=None):
+    """
+    Ventas del dia cuyo campo 'Resumen' menciona la palabra 'pendiente'.
+    Reutiliza ventas_del_dia() (cache y orden), asi que no genera peticiones
+    extra a la API.
+    """
+    if fecha is None:
+        fecha = hoy_ecuador()
+    return [
+        v for v in ventas_del_dia(fecha)
+        if "pendiente" in str(v.get(CAMPO_RESUMEN, "")).lower()
+    ]
 
 
 def resumen_del_dia(fecha=None):
