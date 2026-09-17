@@ -22,6 +22,7 @@ Variables de entorno:
   HORA_REPORTE_DIARIO    hora del reporte diario (formato HH:MM, hora Ecuador, def. 22:00)
   SCAN_DELAY_SECONDS     pausa (seg) entre peticiones en barridos masivos (def. 2.0)
   RETIROS_DB_PATH        ruta del archivo retiros.json (caché de fecha de retiro)
+  RETIROS_HISTORICO_PATH ruta del historico de guias en retiro (no perder data)
 """
 
 import os
@@ -135,7 +136,7 @@ def manejar_comando(chat_id, texto):
                "• /ventas dd/mm/aaaa — pedidos por fecha\n"
                "• /pendientes — pedidos pendientes\n"
                "• /retiro — pedidos disponibles para retiro en Servientrega\n"
-               "• /seguimiento ayer o fecha — CSV de retiros (días sin retirar)\n"
+               "• /seguimiento ayer, fecha o 'todos' — CSV de retiros (días sin retirar)\n"
                "• /reporte_diario — reporte completo del día (resumen + ventas + retiros)\n"
                "• /pedido <teléfono> — datos de envío de un cliente\n"
                "• /campos <teléfono> — ver todos los campos de un cliente")
@@ -277,10 +278,18 @@ def manejar_comando(chat_id, texto):
         return
 
     if cmd == "/seguimiento":
-        fecha = _parse_arg_fecha(texto)
-        f_s = (fecha or chateapro.hoy_ecuador()).strftime("%d/%m/%Y")
-        scope = ("últimas 24h" if (fecha is None or fecha == chateapro.hoy_ecuador())
-                 else "todos los suscriptores")
+        partes = texto.split(maxsplit=1)
+        arg = partes[1].strip().lower() if len(partes) > 1 else ""
+        if arg in ("todos", "todas", "todo"):
+            # Barrido completo: todas las guias en retiro, sin importar fecha.
+            fecha = chateapro.hoy_ecuador() - dt.timedelta(days=3650)
+            f_s = "todas las fechas"
+            scope = "todos los suscriptores"
+        else:
+            fecha = _parse_arg_fecha(texto)
+            f_s = (fecha or chateapro.hoy_ecuador()).strftime("%d/%m/%Y")
+            scope = ("últimas 24h" if (fecha is None or fecha == chateapro.hoy_ecuador())
+                     else "todos los suscriptores")
         enviar(chat_id,
                f"⏳ Generando seguimiento de retiros ({f_s}, {scope})... "
                "puede tardar unos segundos")
@@ -298,7 +307,8 @@ def manejar_comando(chat_id, texto):
                         f"Pedidos para retiro: {len(filas)}\n"
                         "Columnas: guía, nombre, teléfono, ciudad, provincia, "
                         "dirección, productos, valor, bodega, tasa, estado, "
-                        "fecha en retiro, días sin retirar\n"
+                        "fecha en retiro, días sin retirar, datos_dropi "
+                        "(JSON completo de Dropi)\n"
                         "Archivo: seguimiento_retiro.csv")
 
             con_fecha = [x for x in filas if x["dias_sin_retirar"] != ""]
@@ -336,7 +346,8 @@ def manejar_comando(chat_id, texto):
                     f"Pedidos para retiro: {len(filas)}\n"
                     "Columnas: guía, nombre, teléfono, ciudad, provincia, "
                     "dirección, productos, valor, bodega, tasa, estado, "
-                    "fecha en retiro, días sin retirar\n"
+                    "fecha en retiro, días sin retirar, datos_dropi "
+                    "(JSON completo de Dropi)\n"
                     "Archivo: seguimiento_retiro.csv",
                 )
         except Exception as e:
@@ -436,7 +447,8 @@ def _enviar_reporte_diario():
                             f"Pedidos para retiro: {len(filas)}\n"
                             "Columnas: guía, nombre, teléfono, ciudad, provincia, "
                             "dirección, productos, valor, bodega, tasa, estado, "
-                            "fecha en retiro, días sin retirar\n"
+                            "fecha en retiro, días sin retirar, datos_dropi "
+                            "(JSON completo de Dropi)\n"
                             "Archivo: seguimiento_retiro.csv")
         except Exception as e:
             print(f"Error enviando reporte diario a {chat_id}: {e}")

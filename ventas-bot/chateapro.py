@@ -298,8 +298,17 @@ RUTA_RETIROS = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "retiros.json"),
 )
 
+# Historico de guias en retiro: guarda la fila completa de cada guia detectada.
+# Asi, aunque el suscriptor desaparezca de Chatea Pro, el reporte no pierde el
+# pedido ni los dias sin retirar.
+RUTA_HISTORICO = os.environ.get(
+    "RETIROS_HISTORICO_PATH",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "retiros_historico.json"),
+)
+
 # Caché en memoria de la base de guias->fecha de retiro.
 _RETIROS = None
+_HISTORICO = None
 
 
 def _leer_retiros():
@@ -325,6 +334,31 @@ def _retiros():
     if _RETIROS is None:
         _RETIROS = _leer_retiros()
     return _RETIROS
+
+
+def _leer_historico():
+    try:
+        with open(RUTA_HISTORICO, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def _historico():
+    global _HISTORICO
+    if _HISTORICO is None:
+        _HISTORICO = _leer_historico()
+    return _HISTORICO
+
+
+def _guardar_historico():
+    if _HISTORICO is None:
+        return
+    try:
+        with open(RUTA_HISTORICO, "w", encoding="utf-8") as f:
+            json.dump(_HISTORICO, f, ensure_ascii=False, indent=2)
+    except OSError as e:
+        print("No se pudo guardar retiros_historico.json:", e)
 
 
 def _parse_dropi(valor):
@@ -497,6 +531,13 @@ def _fila_retiro(nombre_campo, valor, campos):
         fecha = fecha_detectada
 
     dias = (hoy_ecuador() - fecha).days if fecha else None
+
+    # JSON completo de la orden tal como lo guarda Dropi (informacion cruda).
+    if d:
+        datos_dropi = json.dumps(d, ensure_ascii=False, separators=(",", ":"))
+    else:
+        datos_dropi = valor
+
     return {
         "guia": guia,
         "nombre": nombre,
@@ -511,36 +552,84 @@ def _fila_retiro(nombre_campo, valor, campos):
         "estado": estado,
         "fecha_en_retiro": fecha.strftime("%d/%m/%Y") if fecha else "",
         "dias_sin_retirar": dias if dias is not None else "",
+        "datos_dropi": datos_dropi,
     }
+
+
+def _actualizar_historico(guia, fila):
+    """Guarda/actualiza la fila de una guia en el historico local."""
+    hist = _historico()
+    actual = hist.get(guia)
+    if actual:
+        # Conserva la fecha original en que se detecto el retiro y si ya se retiro.
+        fila = {**fila,
+                "fecha_en_retiro": actual.get("fecha_en_retiro") or fila["fecha_en_retiro"],
+                "retirado_el": actual.get("retirado_el", "")}
+    else:
+        # Primera deteccion: la fecha en retiro queda fija (el dia detectado).
+        detectado = fila["fecha_en_retiro"] or hoy_ecuador().strftime("%d/%m/%Y")
+        fila = {**fila, "fecha_en_retiro": detectado, "retirado_el": ""}
+    hist[guia] = fila
+
+
+def _marcar_retirados(barrido_completo, vistas_ahora):
+    """En barrridos completos, marca como retiradas las guias que ya no aparecen."""
+    if not barrido_completo:
+        return
+    hoy_s = hoy_ecuador().strftime("%d/%m/%Y")
+    cambio = False
+    for guia, rec in _historico().items():
+        if rec.get("retirado_el") == "" and guia not in vistas_ahora:
+            rec["retirado_el"] = hoy_s
+            cambio = True
+    if cambio:
+        _guardar_historico()
+
+
+def _recomputar_dias(rec):
+    """Recalcula dias sin retirar desde la fecha en retiro (seguimiento diario)."""
+    fecha = _parse_fecha_guardada(rec.get("fecha_en_retiro", ""))
+    rec["dias_sin_retirar"] = (hoy_ecuador() - fecha).days if fecha else ""
+    return rec
 
 
 def seguimiento_retiro(fecha=None):
     """
-    Reporte de seguimiento: una fila por cada campo '[Dropi] Datos de la orden
-    <...>' cuyo estatus (dentro del JSON) es 'PARA RETIRO EN AGENCIA
-    SERVIENTREGA'. Usa la guia real ('shipping_guide') y la fecha registrada por
-    el bot (o 'created_at' como respaldo).
+    Reporte de seguimiento: una fila por cada guia con estatus 'PARA RETIRO EN
+    AGENCIA SERVIENTREGA', combinando lo detectado ahora en Chatea Pro con el
+    historico local (para no perder pedidos si el suscriptor desaparece).
 
     Igual que ventas_del_dia():
       - fecha None u hoy  -> suscriptores recientes (ultimas 24h, rapido).
-      - fecha pasada      -> recorre TODOS los suscriptores (completo, lento).
+      - fecha pasada/'todos' -> recorre TODOS los suscriptores (completo, lento)
+        y marca como retiradas las guias que ya no estan en retiro.
     """
     if fecha is None:
         fecha = hoy_ecuador()
-    if fecha == hoy_ecuador():
-        suscriptores = listar_suscriptores_recientes()
-    else:
+    barrido_completo = fecha != hoy_ecuador()
+    if barrido_completo:
         suscriptores = listar_todos_suscriptores()
+    else:
+        suscriptores = listar_suscriptores_recientes()
 
-    filas = []
+    vistas_ahora = set()
     for s in suscriptores:
         campos = obtener_campos(s["user_ns"])
         registrar_retiros(campos)
         for nombre_campo, valor in campos_dropi(campos):
             if not es_estado_retiro(valor):
                 continue
-            filas.append(_fila_retiro(nombre_campo, valor, campos))
+            guia = _guia_campo(nombre_campo, valor)
+            _actualizar_historico(guia, _fila_retiro(nombre_campo, valor, campos))
+            vistas_ahora.add(guia)
         _throttle()
+
+    _marcar_retirados(barrido_completo, vistas_ahora)
+
+    # Reporte = guias activas (aun no retiradas) desde el historico.
+    filas = [ _recomputar_dias(rec)
+              for rec in _historico().values()
+              if rec.get("retirado_el") == "" ]
     # Ordena por mas dias sin retirar primero (los sin fecha al final).
     filas.sort(key=lambda r: (r["dias_sin_retirar"] == "", -(r["dias_sin_retirar"] or 0)))
     return filas
