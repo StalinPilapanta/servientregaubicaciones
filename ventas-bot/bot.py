@@ -45,11 +45,23 @@ ALLOWED = {
 
 
 def enviar(chat_id, texto):
-    requests.post(f"{TG_API}/sendMessage", data={
+    r = requests.post(f"{TG_API}/sendMessage", data={
         "chat_id": chat_id,
         "text": texto,
         "parse_mode": "Markdown",
     }, timeout=30)
+    # Si Telegram rechaza el texto (p.ej. Markdown mal formado con '[' sueltos),
+    # reenviar SIN parse_mode para garantizar que el mensaje siempre llegue.
+    if not r.ok:
+        try:
+            ok = r.json().get("ok", False)
+        except Exception:
+            ok = False
+        if not ok:
+            requests.post(f"{TG_API}/sendMessage", data={
+                "chat_id": chat_id,
+                "text": texto,
+            }, timeout=30)
 
 
 def enviar_documento(chat_id, ruta, caption):
@@ -123,7 +135,7 @@ def manejar_comando(chat_id, texto):
                "• /ventas dd/mm/aaaa — pedidos por fecha\n"
                "• /pendientes — pedidos pendientes\n"
                "• /retiro — pedidos disponibles para retiro en Servientrega\n"
-               "• /seguimiento [ayer|fecha] — CSV de retiros (días sin retirar)\n"
+               "• /seguimiento ayer o fecha — CSV de retiros (días sin retirar)\n"
                "• /reporte_diario — reporte completo del día (resumen + ventas + retiros)\n"
                "• /pedido <teléfono> — datos de envío de un cliente\n"
                "• /campos <teléfono> — ver todos los campos de un cliente")
