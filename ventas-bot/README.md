@@ -23,6 +23,10 @@ SERVIENTREGA"** y lleva su seguimiento (dias sin retirar).
   - fecha pasada o `todos` → recorre TODOS los suscriptores (completo, lento)
 - `/reporte_diario` — envia el CSV de seguimiento del dia (tambien se envia
   automatico a las 22:00 hora Ecuador)
+- `/guia <numero>` — movimientos Servientrega de la guia (Dropi directo)
+- `/dropi_pedidos [ESTADO] [n]` — pedidos directo de Dropi + CSV
+  (ej: `/dropi_pedidos PARA RETIRO EN AGENCIA SERVIENTREGA 20`)
+- `/dropi_saldo` — saldo de cartera Dropi
 
 ## Como funciona
 
@@ -51,6 +55,24 @@ El bot guarda dos archivos locales:
 | `SCAN_DELAY_SECONDS` | Pausa entre peticiones en escaneos grandes (default `2.0`) |
 | `RETIROS_DB_PATH` | Ruta de `retiros.json` (default: junto al codigo) |
 | `RETIROS_HISTORICO_PATH` | Ruta de `retiros_historico.json` (default: junto al codigo) |
+| `DROPI_EMAIL` / `DROPI_PASSWORD` | Cuenta Dropi para conexion directa (reportes/gestion) |
+| `DROPI_MFA_CODE` | Codigo MFA fresco, solo al hacer login (vence en ~30s) |
+| `DROPI_COUNTRY_CODE` | Pais de la cuenta (def. `ec`, header X-Host) |
+
+## Dropi directo (`dropi.py`)
+
+Ademas de leer ChateaPro, el bot puede hablar directo con `app.dropi.ec`:
+
+- Login: `POST api-v2.dropi.ec/bff/auth/core/login` (email + password + MFA).
+  El token dura ~12h y se cachea: las llamadas siguientes no piden MFA.
+- Lee: ordenes (`/bff/orders/myorders/v2` con filtros), historial de guias
+  (Servientrega), saldo (`/bff/wallet/balance`).
+- Escribe (implementado, sin probar en vivo aun): `crear_orden()` y
+  `cotizar()` contra `/bff/orders` y `/bff/orders/quote`.
+
+Los tokens de `Mis Integraciones` (ej. DROPILYZER) NO sirven para esto:
+el API responde `Token not issued to this api`. Para operar sin MFA
+pedir a Dropi un token server-to-server.
 
 ## Despliegue en Coolify
 

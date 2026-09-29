@@ -9,7 +9,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY chateapro.py bot.py ./
+COPY chateapro.py bot.py dropi.py ./
 
 # El bot usa long polling (getUpdates); no expone puertos ni necesita dominio.
 CMD ["python", "bot.py"]

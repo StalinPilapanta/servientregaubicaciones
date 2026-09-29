@@ -36,6 +36,13 @@ import requests
 
 import chateapro
 
+try:
+    import dropi
+    _DROPI_OK = bool(dropi.EMAIL and dropi.PASSWORD)
+except Exception:
+    dropi = None
+    _DROPI_OK = False
+
 TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TG_API = f"https://api.telegram.org/bot{TG_TOKEN}"
 
@@ -139,7 +146,10 @@ def manejar_comando(chat_id, texto):
                "• /seguimiento ayer, fecha o 'todos' — CSV de retiros (días sin retirar)\n"
                "• /reporte_diario — reporte completo del día (resumen + ventas + retiros)\n"
                "• /pedido <teléfono> — datos de envío de un cliente\n"
-               "• /campos <teléfono> — ver todos los campos de un cliente")
+               "• /campos <teléfono> — ver todos los campos de un cliente\n"
+               "• /guia <número> — movimientos Servientrega (Dropi directo)\n"
+               "• /dropi_pedidos [estado] — pedidos directo de Dropi\n"
+               "• /dropi_saldo — saldo de cartera Dropi")
         return
 
     if cmd == "/resumen":
@@ -352,6 +362,86 @@ def manejar_comando(chat_id, texto):
                 )
         except Exception as e:
             enviar(chat_id, f"❌ Error al generar el reporte diario: {e}")
+        return
+
+    if cmd == "/guia":
+        partes = texto.split(maxsplit=1)
+        if len(partes) < 2:
+            enviar(chat_id, "Uso: /guia <número>  (ej: /guia 189832507)")
+            return
+        if not _DROPI_OK:
+            enviar(chat_id, "Dropi directo no configurado (faltan DROPI_EMAIL / DROPI_PASSWORD).")
+            return
+        numero = partes[1].strip()
+        enviar(chat_id, f"⏳ Consultando guía {numero} en Dropi...")
+        try:
+            movs = dropi.movimientos_guia(numero)
+            if not movs:
+                enviar(chat_id, f"No existe la guía {numero} en Dropi.")
+                return
+            lineas = [f"📦 *Guía {numero}* ({len(movs)} movimientos)\n"]
+            for m in movs[-10:]:
+                lineas.append(
+                    f"• {m.get('NomMov', '-')} — {m.get('FecMov', '')}\n"
+                    f"  {m.get('OriMov', '')} → {m.get('DesMov', '')}"
+                )
+            enviar(chat_id, "\n".join(lineas))
+        except Exception as e:
+            enviar(chat_id, f"❌ Error al consultar la guía: {e}")
+        return
+
+    if cmd == "/dropi_pedidos":
+        if not _DROPI_OK:
+            enviar(chat_id, "Dropi directo no configurado (faltan DROPI_EMAIL / DROPI_PASSWORD).")
+            return
+        partes = texto.split(maxsplit=2)
+        estado = partes[1].upper() if len(partes) > 1 else None
+        try:
+            n = int(partes[2]) if len(partes) > 2 else 15
+        except ValueError:
+            n = 15
+        filtros = {"status": estado} if estado else None
+        enviar(chat_id, "⏳ Consultando pedidos en Dropi...")
+        try:
+            items, total = dropi.objetos_ordenes(
+                dropi.listar_mis_ordenes(page=1, per_page=min(n, 50),
+                                         filtros=filtros))
+            if not items:
+                enviar(chat_id, "Sin pedidos para ese filtro en Dropi.")
+                return
+            titulo = f"📦 *Pedidos Dropi{f' ({estado})' if estado else ''}*\n"
+            lineas = [titulo]
+            for o in items:
+                nombre = f"{o.get('name', '')} {o.get('surname', '')}".strip() or "-"
+                lineas.append(
+                    f"• #{o.get('id')} — {nombre}\n"
+                    f"  📲 {o.get('phone', '-')} — 📍 {o.get('city', '-')}\n"
+                    f"  {o.get('status', '-')} — ${o.get('total_order', '-')} — "
+                    f"guía {o.get('shipping_guide') or '-'}"
+                )
+            enviar(chat_id, "\n".join(lineas))
+            filas = [{
+                "id": o.get("id"), "nombre": f"{o.get('name', '')} {o.get('surname', '')}".strip(),
+                "telefono": o.get("phone"), "ciudad": o.get("city"),
+                "estado": o.get("status"), "valor": o.get("total_order"),
+                "guia": o.get("shipping_guide") or "",
+            } for o in items]
+            _enviar_csv(chat_id, filas, f"📦 Pedidos Dropi{f' ({estado})' if estado else ''} (total: {total})")
+        except Exception as e:
+            enviar(chat_id, f"❌ Error al listar pedidos Dropi: {e}")
+        return
+
+    if cmd == "/dropi_saldo":
+        if not _DROPI_OK:
+            enviar(chat_id, "Dropi directo no configurado (faltan DROPI_EMAIL / DROPI_PASSWORD).")
+            return
+        try:
+            s = dropi.saldo_cartera()
+            enviar(chat_id,
+                   f"💰 *Cartera Dropi:* {s.get('amount', '-')} "
+                   f"{s.get('currency_code', '')}")
+        except Exception as e:
+            enviar(chat_id, f"❌ Error al consultar saldo: {e}")
         return
 
     enviar(chat_id, "No reconozco ese comando. Usa /ayuda para ver las opciones.")
