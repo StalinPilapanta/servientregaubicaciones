@@ -132,7 +132,9 @@ def _ejecutar_buscar_agencia(argumentos):
             "agencias": [],
         }
 
-    resultado = buscar(texto, agencias=AGENCIAS, limite=3)
+    # limite=5: cuando el cliente da ciudad+sector devolvemos hasta 5 cercanas.
+    # Cuando da solo la ciudad, el buscador lista todas (hasta max_ciudad=25).
+    resultado = buscar(texto, agencias=AGENCIAS, limite=5)
     agencias = [
         {
             "nombre": r["nombre"],
@@ -148,6 +150,8 @@ def _ejecutar_buscar_agencia(argumentos):
     return {
         "ok": bool(agencias),
         "ciudad_detectada": resultado.get("ciudad_detectada"),
+        "modo": resultado.get("modo"),
+        "total_ciudad": resultado.get("total_ciudad", 0),
         "agencias": agencias,
         "mensaje": resultado.get("mensaje", ""),
     }

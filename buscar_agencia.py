@@ -250,14 +250,43 @@ def formato_agencia(a):
     }
 
 
-def buscar(texto_cliente, agencias=None, limite=3):
+def _tiene_detalle_sector(texto_norm, ciudad, toks_cliente, candidatas):
+    """
+    Decide si el cliente dio ALGO MAS que la ciudad (sector, barrio, calles).
+
+    Devuelve True si el texto, quitando las palabras de la ciudad, aun tiene
+    tokens utiles que podrian coincidir con un sector/direccion. Asi sabemos
+    si filtrar por sector (dio detalle) o listar toda la ciudad (dio solo ciudad).
+    """
+    # Palabras que forman el nombre de la ciudad (para descontarlas).
+    palabras_ciudad = set(ciudad.split()) if ciudad else set()
+    # Tokens del cliente que NO son parte del nombre de la ciudad.
+    extra = {t for t in toks_cliente if t not in palabras_ciudad}
+    if not extra:
+        return False
+    # Hay detalle solo si alguno de esos tokens aparece en el sector o la
+    # direccion/nombre de alguna agencia de la ciudad (evita que un "quiero"
+    # perdido cuente como sector).
+    for a in candidatas:
+        if a["_sector_norm"] and any(t in a["_sector_norm"] for t in extra):
+            return True
+        if any(t in a["_texto_norm"] for t in extra if len(t) > 2):
+            return True
+    return False
+
+
+def buscar(texto_cliente, agencias=None, limite=3, max_ciudad=25):
     """
     Punto de entrada principal.
 
-    Devuelve un dict con:
-      - ciudad_detectada
-      - resultados: lista de agencias (mejores primero)
-      - mensaje: texto listo para responder en el chat
+    Comportamiento:
+      - Si el cliente da SOLO la ciudad (ej. "Ambato") -> devuelve TODAS las
+        agencias de esa ciudad (hasta max_ciudad), para listarlas o pedir sector.
+      - Si da ciudad + sector/calles (ej. "Ambato Ficoa") -> devuelve las mas
+        cercanas a ese sector (hasta 'limite'), mejores primero.
+      - Si la ciudad tiene 1 sola agencia -> la devuelve directo.
+
+    Devuelve dict con: ciudad_detectada, modo, total_ciudad, resultados, mensaje.
     """
     if agencias is None:
         agencias = cargar_directorio()
@@ -268,40 +297,81 @@ def buscar(texto_cliente, agencias=None, limite=3):
 
     ciudad = detectar_ciudad(texto_norm, ciudades)
 
-    if ciudad:
-        candidatas = [a for a in agencias if a["_ciudad_norm"] == ciudad]
-    else:
-        # Sin ciudad clara: buscamos en todo el directorio, pero solo tendra
-        # sentido si el texto trae calles/sectores muy especificos.
-        candidatas = agencias
+    if not ciudad:
+        # Sin ciudad: solo intentamos por sector/calles muy especificos.
+        puntuadas = []
+        for a in agencias:
+            s = puntuar(a, texto_norm, toks_cliente)
+            if s >= 20:
+                puntuadas.append((s, a))
+        puntuadas.sort(key=lambda x: x[0], reverse=True)
+        mejores = [formato_agencia(a) for _, a in puntuadas[:limite]]
+        return {
+            "ciudad_detectada": None,
+            "modo": "sin_ciudad",
+            "total_ciudad": 0,
+            "resultados": mejores,
+            "mensaje": _armar_mensaje(None, mejores, "sin_ciudad"),
+        }
 
-    # Umbral minimo de puntaje para considerar una agencia "relevante".
-    # Sin ciudad exigimos mas evidencia (calles/sector), para no adivinar.
-    if ciudad:
-        umbral = 21  # basta con estar en la ciudad (bonus 20) + algo mas
-        bonus_ciudad = 20
-    else:
-        umbral = 20  # requiere coincidencias reales de sector/calles
-        bonus_ciudad = 0
+    candidatas = [a for a in agencias if a["_ciudad_norm"] == ciudad]
 
-    puntuadas = []
-    for a in candidatas:
-        s = puntuar(a, texto_norm, toks_cliente) + bonus_ciudad
-        if s >= umbral:
-            puntuadas.append((s, a))
+    # Caso facil: la ciudad tiene una sola agencia.
+    if len(candidatas) == 1:
+        res = [formato_agencia(candidatas[0])]
+        return {
+            "ciudad_detectada": ciudad,
+            "modo": "unica",
+            "total_ciudad": 1,
+            "resultados": res,
+            "mensaje": _armar_mensaje(ciudad, res, "unica"),
+        }
 
-    puntuadas.sort(key=lambda x: x[0], reverse=True)
-    mejores = [formato_agencia(a) for _, a in puntuadas[:limite]]
+    dio_detalle = _tiene_detalle_sector(texto_norm, ciudad, toks_cliente,
+                                        candidatas)
 
+    if dio_detalle:
+        # Rankear por sector/calles y devolver las mejores.
+        puntuadas = [(puntuar(a, texto_norm, toks_cliente), a)
+                     for a in candidatas]
+        puntuadas.sort(key=lambda x: x[0], reverse=True)
+        mejores = [formato_agencia(a) for _, a in puntuadas[:limite]]
+        return {
+            "ciudad_detectada": ciudad,
+            "modo": "ciudad_sector",
+            "total_ciudad": len(candidatas),
+            "resultados": mejores,
+            "mensaje": _armar_mensaje(ciudad, mejores, "ciudad_sector"),
+        }
+
+    # Solo ciudad: listar TODAS (ordenando primero las que entregan en oficina).
+    candidatas.sort(
+        key=lambda a: 0 if str(a.get("Entrega_en_oficina", "")).upper() == "SI"
+        else 1
+    )
+    todas = [formato_agencia(a) for a in candidatas[:max_ciudad]]
     return {
         "ciudad_detectada": ciudad,
-        "total_candidatas": len(candidatas) if ciudad else 0,
-        "resultados": mejores,
-        "mensaje": _armar_mensaje(ciudad, mejores),
+        "modo": "solo_ciudad",
+        "total_ciudad": len(candidatas),
+        "resultados": todas,
+        "mensaje": _armar_mensaje(ciudad, todas, "solo_ciudad",
+                                  total=len(candidatas)),
     }
 
 
-def _armar_mensaje(ciudad, resultados):
+def _linea_agencia(i, r):
+    oficina = ("entrega en oficina"
+               if str(r["entrega_en_oficina"]).upper() == "SI"
+               else "NO entrega en oficina")
+    return (f"{i}. {r['nombre']}\n"
+            f"   Direccion: {r['direccion']}\n"
+            f"   Sector: {r['sector']} | Tel: {r['telefono']}\n"
+            f"   Horario L-V: {r['horario_lun_vie']} ({oficina})")
+
+
+def _armar_mensaje(ciudad, resultados, modo="ciudad_sector", total=None):
+    # Sin resultados.
     if not resultados:
         if ciudad:
             return (f"Encontre tu ciudad ({ciudad.title()}) pero necesito el "
@@ -309,17 +379,32 @@ def _armar_mensaje(ciudad, resultados):
         return ("No pude identificar la ciudad. Por favor escribeme tu ciudad "
                 "y el sector (ej: 'Ambato, sector Ficoa').")
 
-    lineas = ["Estas son las oficinas Servientrega mas cercanas:\n"]
-    for i, r in enumerate(resultados, 1):
-        oficina = "entrega en oficina" if str(
-            r["entrega_en_oficina"]).upper() == "SI" else "NO entrega en oficina"
-        lineas.append(
-            f"{i}. {r['nombre']}\n"
-            f"   Direccion: {r['direccion']}\n"
-            f"   Sector: {r['sector']} | Tel: {r['telefono']}\n"
-            f"   Horario L-V: {r['horario_lun_vie']} ({oficina})"
-        )
-    return "\n".join(lineas)
+    # Una sola agencia en la ciudad.
+    if modo == "unica":
+        r = resultados[0]
+        return (f"En {r['ciudad'].title()} la oficina Servientrega es:\n\n"
+                + _linea_agencia(1, r))
+
+    # El cliente dio solo la ciudad.
+    if modo == "solo_ciudad":
+        # Ciudad grande: NO listar decenas; pedir sector primero.
+        if total is not None and total > 8:
+            return (f"En {ciudad.title()} hay {total} oficinas Servientrega. "
+                    f"Para darte la mas cercana indicame tu sector o barrio "
+                    f"(ej: norte, sur, centro, o el nombre de tu barrio).")
+        # Ciudad chica/mediana: listar todas.
+        enc = (f"En {ciudad.title()} hay {total} oficinas Servientrega. "
+               f"Indicame tu sector o barrio para elegir la mas cercana. "
+               f"Estas son las disponibles:\n")
+        cuerpo = "\n".join(_linea_agencia(i, r)
+                           for i, r in enumerate(resultados, 1))
+        return enc + "\n" + cuerpo
+
+    # Ciudad + sector, o sin ciudad: las mejores primero.
+    enc = "Estas son las oficinas Servientrega mas cercanas:\n"
+    cuerpo = "\n".join(_linea_agencia(i, r)
+                       for i, r in enumerate(resultados, 1))
+    return enc + "\n" + cuerpo
 
 
 if __name__ == "__main__":
@@ -327,5 +412,6 @@ if __name__ == "__main__":
     print(f"Consulta: {consulta}\n")
     salida = buscar(consulta)
     print(f"Ciudad detectada: {salida['ciudad_detectada']}")
-    print(f"Candidatas en la ciudad: {salida['total_candidatas']}\n")
+    print(f"Modo: {salida['modo']} | Total en ciudad: {salida['total_ciudad']}")
+    print(f"Devueltas: {len(salida['resultados'])}\n")
     print(salida["mensaje"])
