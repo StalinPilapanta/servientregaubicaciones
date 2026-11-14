@@ -11,6 +11,11 @@ Comandos:
   /reporte_diario -> reporte completo del dia (resumen + ventas + retiros)
   /pedido <telefono>  -> "Resumen del pedido - Datos de envio" de un cliente
   /campos <telefono>  -> muestra todos los campos guardados del cliente
+  /ficha <telefono>   -> ficha de la venta (promo + agencia detectada) con botones
+  /crear <telefono>   -> crea el pedido en Dropi (via Hermes) si la ficha esta completa
+
+Cada venta nueva llega a Telegram como ficha con botones:
+  [Crear pedido en Dropi] [agencias alternativas] [Reanalizar]
 
 Usa long polling (getUpdates), asi que NO necesita webhook ni dominio publico.
 Se controla el acceso con AUTHORIZED_CHAT_IDS (solo tu chat puede usarlo).
@@ -23,18 +28,35 @@ Variables de entorno:
   SCAN_DELAY_SECONDS     pausa (seg) entre peticiones en barridos masivos (def. 2.0)
   RETIROS_DB_PATH        ruta del archivo retiros.json (caché de fecha de retiro)
   RETIROS_HISTORICO_PATH ruta del historico de guias en retiro (no perder data)
+  OPENAI_API_KEY         clave de OpenAI (promo + ubicacion desde el chat)
+  OPENAI_MODEL           modelo (def. gpt-4o-mini)
+  AGENCIAS_API_URL       servicio de agencias (def. https://servientrega.neolabsgroup.io)
+  AGENCIAS_TOKEN         token opcional del servicio de agencias
+  HERMES_URL             endpoint de Hermes que crea el pedido en Dropi (MCP)
+  HERMES_TOKEN           token opcional de Hermes
+  HERMES_TIMEOUT         segundos de espera a Hermes (def. 120)
+  PEDIDOS_CREADOS_PATH   registro anti-duplicados de pedidos creados
 """
 
 import os
+import re
 import csv
+import json
 import time
 import html
+import threading
 import tempfile
 import datetime as dt
+
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse
 
 import requests
 
 import chateapro
+import ficha
+import dropi_mcp
+import reporte_agencia
 
 try:
     import dropi
@@ -97,6 +119,174 @@ def _enviar_csv(chat_id, filas, caption):
             pass
 
 
+# --- Ficha de venta con botones (promo + agencia + crear en Dropi) ---
+
+# Clientes cuyo pedido se esta creando ahora (evita doble clic / doble envio).
+_creando = set()
+_creando_lock = threading.Lock()
+
+
+def enviar_plano(chat_id, texto, botones=None):
+    """Envia texto SIN parse_mode (las fichas llevan guiones bajos). Devuelve message_id."""
+    data = {"chat_id": chat_id, "text": texto}
+    if botones:
+        data["reply_markup"] = json.dumps({"inline_keyboard": botones})
+    try:
+        r = requests.post(f"{TG_API}/sendMessage", data=data, timeout=30)
+        return (r.json().get("result") or {}).get("message_id")
+    except Exception as e:
+        print("Error enviando mensaje:", e)
+        return None
+
+
+def editar_plano(chat_id, message_id, texto, botones=None):
+    data = {"chat_id": chat_id, "message_id": message_id, "text": texto,
+            "reply_markup": json.dumps({"inline_keyboard": botones or []})}
+    try:
+        requests.post(f"{TG_API}/editMessageText", data=data, timeout=30)
+    except Exception as e:
+        print("Error editando mensaje:", e)
+
+
+def responder_callback(callback_id, texto="", alerta=False):
+    try:
+        requests.post(f"{TG_API}/answerCallbackQuery", data={
+            "callback_query_id": callback_id, "text": texto[:190],
+            "show_alert": "true" if alerta else "false",
+        }, timeout=15)
+    except Exception as e:
+        print("Error answerCallbackQuery:", e)
+
+
+def enviar_ficha(chat_id, a):
+    return enviar_plano(chat_id, ficha.texto_ficha(a), ficha.teclado(a))
+
+
+def _nombre_de(a):
+    c = a["campos"]
+    return c.get(chateapro.CAMPO_NOMBRE) or c.get("_name") or "cliente"
+
+
+def _campos_por_telefono(telefono):
+    """Busca los campos de un cliente por telefono (ventas de hoy y recientes)."""
+    digitos = re.sub(r"\D", "", telefono)[-9:]
+    if len(digitos) < 7:
+        return None
+    for v in chateapro.ventas_del_dia():
+        if digitos in re.sub(r"\D", "", str(v.get("_phone", ""))):
+            return v
+    for s in chateapro.listar_suscriptores_recientes():
+        campos = chateapro.obtener_campos(s["user_ns"])
+        if digitos in re.sub(r"\D", "", str(campos.get("_phone", ""))):
+            return campos
+    return None
+
+
+def _ejecutar_creacion(chat_id, message_id, a):
+    """Corre en un hilo: delega a Hermes y reporta el resultado en Telegram."""
+    ns = a["ns"]
+    try:
+        res = ficha.crear_pedido(a)
+    except Exception as e:  # nunca dejar el ns bloqueado
+        res = {"ok": False, "order_id": None, "guia": None, "mensaje": str(e)}
+    finally:
+        with _creando_lock:
+            _creando.discard(ns)
+
+    if res["ok"]:
+        txt = f"✅ Pedido creado en Dropi: #{res['order_id']}\n👤 {_nombre_de(a)}"
+        if res.get("guia"):
+            txt += f"\n🔖 Guía: {res['guia']}"
+    else:
+        txt = (f"❌ No se creó el pedido de {_nombre_de(a)}.\n{res['mensaje']}\n"
+               "Antes de reintentar revisa en Dropi que no se haya creado.")
+    enviar_plano(chat_id, txt)
+    if message_id:
+        editar_plano(chat_id, message_id, ficha.texto_ficha(a), ficha.teclado(a))
+
+
+def _iniciar_creacion(chat_id, message_id, a):
+    """Valida y lanza la creacion en un hilo. Devuelve (ok, mensaje)."""
+    motivos = ficha.bloqueos(a)
+    if motivos:
+        return False, "; ".join(motivos)
+    with _creando_lock:
+        if a["ns"] in _creando:
+            return False, "Ya se está creando este pedido."
+        _creando.add(a["ns"])
+    threading.Thread(target=_ejecutar_creacion, args=(chat_id, message_id, a),
+                     daemon=True).start()
+    return True, "Creando pedido en Dropi..."
+
+
+def _ficha_de(ns, forzar=False):
+    """Analisis cacheado, o lo reconstruye si el bot se reinicio."""
+    if forzar:
+        chateapro._CACHE.pop(ns, None)  # releer campos frescos del CRM
+        ficha._CACHE.pop(ns, None)
+    a = ficha._CACHE.get(ns)
+    if a is None:
+        a = ficha.analizar(chateapro.obtener_campos(ns), forzar=True)
+    return a
+
+
+def manejar_callback(cb):
+    """Atiende los botones de la ficha: crear:<ns>, ag:<ns>:<i>, re:<ns>."""
+    cb_id = cb.get("id")
+    msg = cb.get("message") or {}
+    chat_id = (msg.get("chat") or {}).get("id")
+    message_id = msg.get("message_id")
+    if not autorizado(chat_id):
+        responder_callback(cb_id, "No autorizado", True)
+        return
+
+    partes = (cb.get("data") or "").split(":")
+    accion = partes[0]
+    ns = partes[1] if len(partes) > 1 else ""
+    if not ns:
+        responder_callback(cb_id, "Botón inválido", True)
+        return
+
+    try:
+        if accion == "re":
+            a = _ficha_de(ns, forzar=True)
+            responder_callback(cb_id, "Ficha actualizada")
+            editar_plano(chat_id, message_id, ficha.texto_ficha(a), ficha.teclado(a))
+        elif accion == "ag" and len(partes) == 3:
+            a = _ficha_de(ns)
+            if ficha.elegir_agencia(a, int(partes[2])):
+                responder_callback(cb_id, "Agencia elegida")
+                editar_plano(chat_id, message_id, ficha.texto_ficha(a), ficha.teclado(a))
+            else:
+                responder_callback(cb_id, "Esa opción ya no existe, pulsa Reanalizar", True)
+        elif accion == "crear":
+            a = _ficha_de(ns)
+            ok, texto = _iniciar_creacion(chat_id, message_id, a)
+            responder_callback(cb_id, texto, not ok)
+            if ok and message_id:
+                # Quita los botones mientras se crea (evita doble clic).
+                editar_plano(chat_id, message_id,
+                             ficha.texto_ficha(a) + "\n\n⏳ Creando pedido en Dropi...")
+        else:
+            responder_callback(cb_id, "Acción desconocida", True)
+    except Exception as e:
+        print("Error en callback:", e)
+        responder_callback(cb_id, f"Error: {e}", True)
+
+
+def _notificar_venta(campos):
+    """Manda la ficha completa a Telegram; si algo falla, el aviso simple de siempre."""
+    try:
+        a = ficha.analizar(campos)
+        for chat_id in ALLOWED:
+            enviar_ficha(chat_id, a)
+    except Exception as e:
+        print("Error armando la ficha, se envia el aviso simple:", e)
+        texto = chateapro.resumen_venta_nueva(campos)
+        for chat_id in ALLOWED:
+            enviar(chat_id, texto)
+
+
 def autorizado(chat_id):
     # Si no se configuran ids permitidos, se permite a todos (no recomendado).
     if not ALLOWED:
@@ -143,13 +333,32 @@ def manejar_comando(chat_id, texto):
                "• /ventas dd/mm/aaaa — pedidos por fecha\n"
                "• /pendientes — pedidos pendientes\n"
                "• /retiro — pedidos disponibles para retiro en Servientrega\n"
+               "• /en_agencia — reporte HTML de pedidos en agencia Servientrega "
+               "(Dropi MCP) con botón de WhatsApp\n"
+               "• /dropi_conectar — iniciar sesión en Dropi (MCP)\n"
                "• /seguimiento ayer, fecha o 'todos' — CSV de retiros (días sin retirar)\n"
                "• /reporte_diario — reporte completo del día (resumen + ventas + retiros)\n"
                "• /pedido <teléfono> — datos de envío de un cliente\n"
                "• /campos <teléfono> — ver todos los campos de un cliente\n"
                "• /guia <número> — movimientos Servientrega (Dropi directo)\n"
                "• /dropi_pedidos [estado] — pedidos directo de Dropi\n"
-               "• /dropi_saldo — saldo de cartera Dropi")
+               "• /dropi_saldo — saldo de cartera Dropi\n"
+               "• /ficha <teléfono> — ficha de la venta (promo + agencia) con botones\n"
+               "• /crear <teléfono> — crea el pedido en Dropi (vía Hermes) si está completo")
+        return
+
+    if cmd == "/en_agencia":
+        enviar_plano(chat_id, "⏳ Consultando en Dropi los pedidos en agencia Servientrega...")
+        threading.Thread(target=_reporte_en_agencia, args=(chat_id,), daemon=True).start()
+        return
+
+    if cmd == "/dropi_conectar":
+        _pedir_conexion_dropi(chat_id, "🔐 Conectar Dropi (MCP).")
+        return
+
+    if cmd == "/dropi_desconectar":
+        dropi_mcp.desconectar()
+        enviar_plano(chat_id, "Dropi (MCP) desconectado. Usa /dropi_conectar para volver a entrar.")
         return
 
     if cmd == "/resumen":
@@ -211,6 +420,33 @@ def manejar_comando(chat_id, texto):
                 enviar(chat_id, f"No encontré un pedido con el teléfono {telefono}.")
         except Exception as e:
             enviar(chat_id, f"❌ Error al buscar el pedido: {e}")
+        return
+
+    if cmd in ("/ficha", "/crear"):
+        partes = texto.split(maxsplit=1)
+        if len(partes) < 2:
+            enviar(chat_id, f"Uso: {cmd} <teléfono>  (ej: {cmd} 995276111)")
+            return
+        telefono = partes[1].strip()
+        enviar(chat_id, f"⏳ Analizando la venta de {telefono}...")
+        try:
+            campos = _campos_por_telefono(telefono)
+            if not campos:
+                enviar(chat_id, f"No encontré una venta con el teléfono {telefono}.")
+                return
+            a = ficha.analizar(campos, forzar=True)
+            if cmd == "/ficha":
+                enviar_ficha(chat_id, a)
+                return
+            # /crear: si algo bloquea, muestra la ficha para que veas por que.
+            ok, mensaje = _iniciar_creacion(chat_id, None, a)
+            if ok:
+                enviar_plano(chat_id, f"⏳ Creando pedido de {_nombre_de(a)} en Dropi...")
+            else:
+                enviar_plano(chat_id, f"⚠️ No se creó: {mensaje}")
+                enviar_ficha(chat_id, a)
+        except Exception as e:
+            enviar(chat_id, f"❌ Error: {e}")
         return
 
     if cmd == "/pendientes":
@@ -447,6 +683,150 @@ def manejar_comando(chat_id, texto):
     enviar(chat_id, "No reconozco ese comando. Usa /ayuda para ver las opciones.")
 
 
+# --- Reporte "pedidos en agencia" via MCP de Dropi (con login OAuth) ---
+
+# Chats que pidieron el reporte y esperan a que se conecte Dropi.
+_esperando_dropi = set()
+_reporte_lock = threading.Lock()
+
+
+def _pedir_conexion_dropi(chat_id, motivo):
+    """Envia el boton para iniciar sesion en Dropi (OAuth del MCP)."""
+    try:
+        url = dropi_mcp.url_autorizacion()
+    except Exception as e:
+        enviar_plano(chat_id, f"❌ No se pudo generar el link de Dropi: {e}")
+        return
+    local = urlparse(dropi_mcp.REDIRECT_URI).hostname in ("localhost", "127.0.0.1")
+    texto = (f"{motivo}\n\n1) Toca «Iniciar sesión en Dropi» y entra con tu cuenta.\n"
+             "2) Autoriza el acceso.\n")
+    if local:
+        texto += ("3) Si al final el navegador muestra «no se puede acceder al sitio» "
+                  "(localhost), copia la URL COMPLETA de la barra de direcciones y "
+                  "pégala aquí en el chat.\n")
+    texto += "\nEl link vence en 15 minutos."
+    enviar_plano(chat_id, texto, [[{"text": "🔐 Iniciar sesión en Dropi", "url": url}]])
+
+
+def _reporte_en_agencia(chat_id):
+    if not _reporte_lock.acquire(blocking=False):
+        enviar_plano(chat_id, "⏳ Ya se está generando un reporte, espera un momento.")
+        return
+    ruta = None
+    try:
+        ruta, pedidos = reporte_agencia.generar(
+            progreso=lambda i, n: print(f"/en_agencia: {i}/{n} pedidos"))
+        enviar_plano(chat_id, reporte_agencia.resumen_telegram(pedidos))
+        enviar_documento(chat_id, ruta,
+                         f"📦 Pedidos en agencia Servientrega: {len(pedidos)}\n"
+                         "Abre el HTML y toca «Enviar WhatsApp» en cada cliente.")
+    except dropi_mcp.AuthRequired:
+        _esperando_dropi.add(chat_id)
+        _pedir_conexion_dropi(
+            chat_id, "🔐 Dropi pide iniciar sesión para generar el reporte.\n"
+                     "Al conectar, el reporte se genera solo.")
+    except Exception as e:
+        enviar_plano(chat_id, f"❌ Error generando el reporte en agencia: {e}")
+    finally:
+        _reporte_lock.release()
+        if ruta:
+            try:
+                os.remove(ruta)
+            except OSError:
+                pass
+
+
+def _dropi_conectado_ok(chat_ids):
+    """Tras el login: avisa y genera los reportes que estaban esperando."""
+    pendientes = set(_esperando_dropi)
+    _esperando_dropi.clear()
+    for cid in set(chat_ids) | pendientes:
+        enviar_plano(cid, "✅ Dropi conectado (MCP).")
+    for cid in pendientes:
+        enviar_plano(cid, "⏳ Generando el reporte de pedidos en agencia...")
+        threading.Thread(target=_reporte_en_agencia, args=(cid,), daemon=True).start()
+
+
+def _procesar_url_dropi(chat_id, texto):
+    try:
+        dropi_mcp.completar_desde_url(texto)
+    except Exception as e:
+        enviar_plano(chat_id, f"❌ No se pudo conectar Dropi: {e}\nUsa /dropi_conectar para intentar de nuevo.")
+        return
+    _dropi_conectado_ok([chat_id])
+
+
+class _OAuthCallback(BaseHTTPRequestHandler):
+    """Recibe el redirect de Dropi cuando el navegador llega al bot."""
+
+    def do_GET(self):
+        ruta = urlparse(self.path).path
+        if ruta != urlparse(dropi_mcp.REDIRECT_URI).path:
+            self.send_response(404)
+            self.end_headers()
+            return
+        try:
+            dropi_mcp.completar_desde_url("http://x" + self.path)
+            ok, msg = True, "✅ Dropi conectado. Ya puedes volver a Telegram."
+        except Exception as e:
+            ok, msg = False, f"❌ No se pudo conectar: {html.escape(str(e))}"
+        self.send_response(200 if ok else 400)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(
+            f"<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'>"
+            f"<body style='font:18px system-ui;padding:24px'>{msg}</body>".encode())
+        if ok:
+            _dropi_conectado_ok(ALLOWED)
+
+    def log_message(self, *args):
+        pass
+
+
+def _iniciar_servidor_oauth():
+    """Servidor HTTP para el redirect OAuth (opcional; si no, se pega la URL)."""
+    if os.environ.get("OAUTH_CALLBACK_SERVER", "true").lower() != "true":
+        return
+    puerto = int(os.environ.get("OAUTH_CALLBACK_PORT")
+                 or urlparse(dropi_mcp.REDIRECT_URI).port or 19876)
+    try:
+        srv = ThreadingHTTPServer(("0.0.0.0", puerto), _OAuthCallback)
+    except OSError as e:
+        print(f"Servidor OAuth no iniciado (puerto {puerto}): {e}. "
+              "Se usara el modo 'pegar URL' en Telegram.")
+        return
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    print(f"Callback OAuth de Dropi escuchando en :{puerto}")
+
+
+MENU_COMANDOS = [
+    ("en_agencia", "Pedidos en agencia Servientrega (HTML + WhatsApp)"),
+    ("resumen", "Ventas de hoy"),
+    ("ventas", "Lista de pedidos de hoy"),
+    ("pendientes", "Pedidos pendientes"),
+    ("retiro", "Disponibles para retiro (Chatea Pro)"),
+    ("seguimiento", "CSV de retiros (ayer, fecha o todos)"),
+    ("reporte_diario", "Reporte completo del día"),
+    ("pedido", "Datos de envío: /pedido <teléfono>"),
+    ("ficha", "Ficha de la venta: /ficha <teléfono>"),
+    ("guia", "Movimientos de una guía"),
+    ("dropi_pedidos", "Pedidos directo de Dropi"),
+    ("dropi_saldo", "Saldo de cartera Dropi"),
+    ("dropi_conectar", "Iniciar sesión en Dropi (MCP)"),
+    ("ayuda", "Ver todos los comandos"),
+]
+
+
+def _registrar_menu():
+    """Publica los comandos en el boton 'Menú' de Telegram."""
+    try:
+        requests.post(f"{TG_API}/setMyCommands", json={
+            "commands": [{"command": c, "description": d} for c, d in MENU_COMANDOS],
+        }, timeout=15)
+    except Exception as e:
+        print("No se pudo registrar el menu de comandos:", e)
+
+
 # --- Notificacion automatica de ventas nuevas ---
 
 # Cada cuantos segundos revisar si hay ventas nuevas.
@@ -600,9 +980,7 @@ def revisar_ventas_nuevas():
         # En la PRIMERA pasada solo marcamos (no notificar el historial).
         if _primera_pasada:
             continue
-        texto = chateapro.resumen_venta_nueva(campos)
-        for chat_id in ALLOWED:
-            enviar(chat_id, texto)
+        _notificar_venta(campos)
 
     _primera_pasada = False
 
@@ -611,6 +989,8 @@ def main():
     if not TG_TOKEN:
         raise SystemExit("Falta TELEGRAM_BOT_TOKEN")
     print("Bot de ventas iniciado. Escuchando mensajes...")
+    _registrar_menu()
+    _iniciar_servidor_oauth()
     if NOTIFICAR:
         print(f"Notificacion automatica ACTIVA (cada {INTERVALO_CHECK}s).")
     if REPORTE_DIARIO:
@@ -632,6 +1012,9 @@ def main():
 
         for u in resp.get("result", []):
             offset = u["update_id"] + 1
+            if u.get("callback_query"):
+                manejar_callback(u["callback_query"])
+                continue
             msg = u.get("message") or u.get("edited_message")
             if not msg:
                 continue
@@ -639,6 +1022,9 @@ def main():
             texto = msg.get("text", "")
             if not autorizado(chat_id):
                 enviar(chat_id, "🚫 No autorizado.")
+                continue
+            if dropi_mcp.es_url_callback(texto):
+                _procesar_url_dropi(chat_id, texto)
                 continue
             manejar_comando(chat_id, texto)
 

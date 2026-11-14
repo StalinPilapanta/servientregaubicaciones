@@ -227,3 +227,6 @@ __marimo__/
 # Editores
 .idea/
 .vscode/
+
+# Token OAuth del MCP de Dropi (bot)
+ventas-bot/dropi_mcp_token.json*

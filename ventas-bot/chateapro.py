@@ -671,3 +671,109 @@ def resumen_del_dia(fecha=None):
         f"💵 *Facturación del día:* ${facturacion:.2f}\n"
         f"🥇 *Producto más vendido:* {top_txt}"
     )
+
+
+# --- Lectura del chat y validacion de datos de una venta ---
+
+def _texto_mensaje(m):
+    """Saca el texto de un mensaje del chat probando las llaves habituales."""
+    if not isinstance(m, dict):
+        return ""
+    for k in ("text", "message", "content", "body", "msg"):
+        v = m.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+        if isinstance(v, dict):  # a veces viene anidado: {"text": "..."}
+            t = v.get("text") or v.get("body")
+            if isinstance(t, str) and t.strip():
+                return t.strip()
+    return ""
+
+
+def _es_del_cliente(m):
+    """True si el mensaje lo escribio el cliente (no el bot ni un agente)."""
+    for k in ("direction", "sender", "from", "type", "source", "role"):
+        v = str(m.get(k) or "").lower()
+        if not v:
+            continue
+        if v in ("in", "incoming", "user", "customer", "subscriber", "client", "cliente"):
+            return True
+        if v in ("out", "outgoing", "bot", "agent", "assistant", "system", "operator"):
+            return False
+    return True  # sin pista: lo tratamos como del cliente
+
+
+def _orden_mensaje(m):
+    for k in ("created_at", "timestamp", "time", "date", "ts"):
+        v = m.get(k)
+        if v not in (None, ""):
+            return str(v)
+    return ""
+
+
+def obtener_chat(user_ns, limite=60):
+    """
+    Devuelve el chat de un suscriptor como lista de strings en orden
+    cronologico: ["Cliente: hola", "Bot: ...", ...].
+
+    Usa GET /subscriber/chat-messages. La forma exacta de la respuesta no esta
+    documentada en este repo, asi que el parseo es tolerante; si no se logra
+    leer nada devuelve [] (la ficha lo avisa para revisar el chat a mano).
+    """
+    data = _get("/subscriber/chat-messages", {
+        "user_ns": user_ns,
+        "include_bot": 1,
+        "limit": min(limite, 100),
+    })
+    items = data.get("data", data)
+    if isinstance(items, dict):
+        items = items.get("messages") or items.get("items") or []
+    if not isinstance(items, list):
+        return []
+
+    items = sorted((m for m in items if isinstance(m, dict)), key=_orden_mensaje)
+    lineas = []
+    for m in items:
+        texto = _texto_mensaje(m)
+        if not texto:
+            continue
+        quien = "Cliente" if _es_del_cliente(m) else "Bot"
+        lineas.append(f"{quien}: {texto}")
+    return lineas
+
+
+# Datos minimos para poder crear el pedido en Dropi.
+# (clave, etiqueta, funcion que obtiene el valor desde los campos)
+_REQUERIDOS = (
+    ("nombre", "Nombre completo", lambda c: c.get(CAMPO_NOMBRE) or c.get("_name")),
+    ("telefono", "Teléfono", lambda c: c.get("_phone")),
+    ("provincia", "Provincia", lambda c: c.get(CAMPO_PROVINCIA)),
+    ("ciudad", "Ciudad", lambda c: c.get(CAMPO_CIUDAD)),
+    ("productos", "Productos escogidos", lambda c: c.get(CAMPO_PRODUCTOS)),
+    ("valor", "Valor de la compra", lambda c: c.get(CAMPO_VALOR)),
+)
+
+
+def datos_faltantes(campos):
+    """Etiquetas de los datos obligatorios que estan vacios en el suscriptor."""
+    faltan = []
+    for _, etiqueta, getter in _REQUERIDOS:
+        v = getter(campos)
+        if not str(v or "").strip() or str(v).strip() in ("-", "null"):
+            faltan.append(etiqueta)
+    return faltan
+
+
+def separar_nombre(nombre_completo):
+    """
+    Divide 'Nombre completo' en (nombre, apellido) como lo pide Dropi.
+    Con 1 palabra el apellido queda vacio; con 2 va 1+1; con 3 o mas
+    la primera mitad es nombre y el resto apellido.
+    """
+    partes = str(nombre_completo or "").split()
+    if not partes:
+        return "", ""
+    if len(partes) == 1:
+        return partes[0], ""
+    corte = 1 if len(partes) <= 3 else 2
+    return " ".join(partes[:corte]), " ".join(partes[corte:])

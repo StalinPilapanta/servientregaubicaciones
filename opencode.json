@@ -1,0 +1,13 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "dropi": {
+      "type": "remote",
+      "url": "https://mcp.dropi.co/mcp",
+      "enabled": true,
+      "oauth": {
+        "redirectUri": "http://localhost:19876/mcp/oauth/callback"
+      }
+    }
+  }
+}

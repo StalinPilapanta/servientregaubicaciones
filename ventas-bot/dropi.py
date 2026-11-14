@@ -119,23 +119,24 @@ def _extraer_token(data):
 
 def login(mfa_code=None):
     """
-    Hace login en Dropi con email + password + codigo MFA fresco.
-    Devuelve el token de sesion (y lo cachea). Lanza RuntimeError si falla.
+    Hace login en Dropi con email + password (+ codigo MFA si la cuenta
+    lo exige). El codigo se toma de DROPI_MFA_CODE; si la cuenta no tiene
+    MFA se loguea sin el. Devuelve el token de sesion (y lo cachea).
     """
-    code = (mfa_code or os.environ.get("DROPI_MFA_CODE", "")).strip()
+    code = (mfa_code if mfa_code is not None
+            else os.environ.get("DROPI_MFA_CODE", "")).strip()
     if not EMAIL or not PASSWORD:
         raise RuntimeError("Faltan DROPI_EMAIL / DROPI_PASSWORD")
-    if not code:
-        raise RuntimeError("Falta el codigo MFA fresco (DROPI_MFA_CODE)")
 
     payload = {
         "email": EMAIL.lower().strip(),
         "password": PASSWORD,
-        "otp": code,
         "white_brand_id": WHITE_BRAND_ID,
         "ipAddress": _mi_ip(),
         "with_cdc": False,
     }
+    if code:
+        payload["otp"] = code
     r = requests.post(API_GO + "/bff/auth/core/login", json=payload,
                       headers=_headers_base(), timeout=30)
     try:

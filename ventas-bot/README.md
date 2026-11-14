@@ -27,6 +27,10 @@ SERVIENTREGA"** y lleva su seguimiento (dias sin retirar).
 - `/dropi_pedidos [ESTADO] [n]` — pedidos directo de Dropi + CSV
   (ej: `/dropi_pedidos PARA RETIRO EN AGENCIA SERVIENTREGA 20`)
 - `/dropi_saldo` — saldo de cartera Dropi
+- `/en_agencia` — reporte HTML de pedidos **en agencia Servientrega** (MCP oficial
+  de Dropi), del más antiguo al más nuevo: nombre, celular, ciudad, guía, producto,
+  agencia + horario, y botón **Enviar WhatsApp** con el mensaje listo
+- `/dropi_conectar` / `/dropi_desconectar` — login OAuth del MCP de Dropi
 
 ## Como funciona
 
@@ -73,6 +77,32 @@ Ademas de leer ChateaPro, el bot puede hablar directo con `app.dropi.ec`:
 Los tokens de `Mis Integraciones` (ej. DROPILYZER) NO sirven para esto:
 el API responde `Token not issued to this api`. Para operar sin MFA
 pedir a Dropi un token server-to-server.
+
+## Reporte en agencia (MCP de Dropi + OAuth desde Telegram)
+
+`dropi_mcp.py` habla con `https://mcp.dropi.co/mcp` (OAuth 2.1: registro dinámico
++ PKCE + refresh token). Si no hay sesión, el bot manda un botón
+**🔐 Iniciar sesión en Dropi**. Tras autorizar, Dropi redirige a
+`DROPI_MCP_REDIRECT_URI`:
+
+- Si el bot recibe esa URL (servidor de callback interno), se conecta solo y
+  genera el reporte que estaba pendiente.
+- Si no (redirect a `localhost` y abriste el link en el celular o el bot está
+  en un VPS), el navegador muestra error: **copia la URL completa y pégala en
+  el chat** y el bot termina la conexión.
+
+El token se renueva solo (refresh) y se guarda en `dropi_mcp_token.json`.
+`reporte_agencia.py` cruza la dirección Dropi (`CIUDAD_AGENCIA---SECTOR---CALLE`)
+con `directorio_limpio.json` para poner el horario real de cada agencia.
+
+| Variable | Descripción |
+|---|---|
+| `DROPI_MCP_REDIRECT_URI` | Def. `http://localhost:19876/mcp/oauth/callback`. Con dominio en Coolify: `https://<dominio>/mcp/oauth/callback` |
+| `OAUTH_CALLBACK_PORT` | Puerto del callback (def. el de la redirect URI o 19876) |
+| `OAUTH_CALLBACK_SERVER` | `false` para no levantar el servidor (solo modo pegar URL) |
+| `DROPI_MCP_TOKEN_PATH` | Ruta del token (def. junto al código; usar volumen) |
+| `WHATSAPP_LINK_BASE` | Def. `https://wa.me/`; `https://web.whatsapp.com/send?phone=` para WhatsApp Web directo |
+| `HORARIO_AGENCIA_DEFECTO` | Horario si la agencia no está en el directorio |
 
 ## Despliegue en Coolify
 
