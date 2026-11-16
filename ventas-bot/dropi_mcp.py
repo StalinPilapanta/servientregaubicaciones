@@ -427,7 +427,19 @@ def _parse_bloque(lineas, i, nivel):
                 continue
             items, i = [], i + 1
             while i < len(lineas) and _indent(lineas[i]) > ind:
-                items.append(_valor(lineas[i].strip().lstrip("- ")))
+                item = lineas[i].strip()
+                resto = item[2:] if item.startswith("- ") else item
+                # "- clave: valor" seguido de mas claves -> lista de objetos
+                if item.startswith("- ") and re.match(r'^"?[\w ]+"?(\[\d+\])?(\{[^}]*\})?:', resto):
+                    base = _indent(lineas[i]) + 2
+                    sub = [" " * base + resto]
+                    i += 1
+                    while i < len(lineas) and _indent(lineas[i]) >= base:
+                        sub.append(lineas[i])
+                        i += 1
+                    items.append(_parse_bloque(sub, 0, base)[0])
+                    continue
+                items.append(_valor(resto))
                 i += 1
             obj[clave] = items
             continue

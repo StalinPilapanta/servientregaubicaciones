@@ -9,28 +9,20 @@ Ademas integra **Dropi**: cada pedido aparece en Chatea Pro como un campo
 orden de Dropi. El bot detecta las guias con estatus **"PARA RETIRO EN AGENCIA
 SERVIENTREGA"** y lleva su seguimiento (dias sin retirar).
 
-## Comandos
+## Comandos (menú)
 
 - `/start` — menu de ayuda
 - `/resumen` — estadisticas del dia (ventas, facturacion, producto mas vendido)
 - `/ventas` — lista de pedidos de hoy
-- `/pedido <telefono>` — "Resumen del pedido - Datos de envio" de un cliente
-- `/pendientes` — pedidos de hoy que aun no tienen datos de envio
-- `/retiro` — guias de hoy entrantes para retiro en agencia Servientrega
-- `/campos` — lista los campos de usuario disponibles (nombres de campos)
-- `/seguimiento [ayer|dd/mm/aaaa|todos]` — CSV de las guias para retiro:
-  - sin argumento → suscriptores recientes (ultimas 24h, rapido)
-  - fecha pasada o `todos` → recorre TODOS los suscriptores (completo, lento)
-- `/reporte_diario` — envia el CSV de seguimiento del dia (tambien se envia
-  automatico a las 22:00 hora Ecuador)
-- `/guia <numero>` — movimientos Servientrega de la guia (Dropi directo)
-- `/dropi_pedidos [ESTADO] [n]` — pedidos directo de Dropi + CSV
-  (ej: `/dropi_pedidos PARA RETIRO EN AGENCIA SERVIENTREGA 20`)
-- `/dropi_saldo` — saldo de cartera Dropi
-- `/en_agencia` — reporte HTML de pedidos **en agencia Servientrega** (MCP oficial
-  de Dropi), del más antiguo al más nuevo: nombre, celular, ciudad, guía, producto,
-  agencia + horario, y botón **Enviar WhatsApp** con el mensaje listo
+- `/en_agencia` — reporte HTML de pedidos en agencia Servientrega (MCP) con botón de WhatsApp
+- `/reporte_diario` — reporte completo del día (también automático a las 22:00)
+- `/guia <número>` — pedido de Dropi con esa guía: estado, cliente, agencia, productos (MCP)
+- `/dropi_pedidos [ESTADO] [n]` — pedidos de Dropi de los últimos 30 días + CSV (MCP)
 - `/dropi_conectar` / `/dropi_desconectar` — login OAuth del MCP de Dropi
+
+Siguen funcionando aunque ya no están en el menú: `/ficha`, `/crear`, `/pedido`,
+`/campos`, `/pendientes`, `/retiro`, `/seguimiento`, `/dropi_saldo`
+(este último usa la API web con MFA, ver abajo).
 
 ## Como funciona
 
@@ -103,6 +95,53 @@ con `directorio_limpio.json` para poner el horario real de cada agencia.
 | `DROPI_MCP_TOKEN_PATH` | Ruta del token (def. junto al código; usar volumen) |
 | `WHATSAPP_LINK_BASE` | Def. `https://wa.me/`; `https://web.whatsapp.com/send?phone=` para WhatsApp Web directo |
 | `HORARIO_AGENCIA_DEFECTO` | Horario si la agencia no está en el directorio |
+
+## Crear pedidos en Dropi desde la ficha (MCP)
+
+Cada venta nueva llega como ficha. El pedido se crea **directo con el MCP de
+Dropi** (misma sesión OAuth de `/dropi_conectar`), sin Hermes:
+
+1. **Productos** (`promos.py`): el embudo sale del campo `ID de Dropi` del CRM
+   (148700 Mega Red, 186883 Drenaje) y los frascos de `Cantidad de productos`.
+   El total sale de la escalera de precios del embudo y desde la promo de la
+   semana se agrega el regalo sorpresa (Aceite Batana $8). Qué producto de
+   Dropi se sube por cantidad se configura en `EMBUDOS`. Ej:
+   Mega Red 1 → Mega Red 3 (14235) $27.99 · Mega Red 2 → 2× 148700 $15 + Batana $8 ·
+   Drenaje 2 → 186883 $27.99 · Drenaje 4 → 2× 186883 $15 + Batana $8.
+2. **Agencia**: el buscador de agencias; si la ciudad tiene varias y no
+   reconoce el sector, se geocodifica la referencia del cliente ("colegio La
+   Salle") con OpenStreetMap y se sugiere la agencia más cercana (con km).
+   Se puede cambiar con los botones.
+3. **Duplicados**: si Dropi ya tiene un pedido activo con ese teléfono
+   (últimos `DROPI_DIAS_DUPLICADO` días) la ficha lo muestra y no deja crear.
+4. **Crear pedido en Dropi** → resuelve ciudad y departamento exactos de Dropi
+   (`search_cities` + `list_departments`), cotiza Servientrega
+   (`quote_shipping`) y muestra el resumen. **Sí, crear en Dropi** →
+   `create_order` con Servientrega y la dirección `AGENCIA---SECTOR---DIRECCIÓN`.
+
+5. **Stock**: antes de mostrar el resumen se revisa el stock de cada producto
+   en Dropi (`list_products`). Si falta, no deja crear y avisa para crearlo a mano.
+6. **Mensaje al cliente**: al crear, se le envía por WhatsApp (Chatea Pro
+   `send-text`) la confirmación con la agencia; plantilla con regalo si es promo.
+   El texto se ve en el resumen antes de confirmar. Si WhatsApp lo rechaza
+   (más de 24h sin que el cliente escriba) el bot avisa para enviarlo a mano.
+7. **Sin agencia**: botón «Pedir agencia/sector al cliente». Si la ciudad tiene
+   pocas agencias (`MAX_AGENCIAS_LISTA`) se le manda la lista numerada; si tiene
+   muchas, se le pide sector o referencia. Cuando responde, «Reanalizar» toma su
+   número. «Ver agencias de X» muestra la ciudad completa para elegir a mano.
+
+«Reanalizar» vuelve a leer el CRM y el chat (por ejemplo después de que el
+cliente responde o de corregir un dato en Chatea Pro) y rehace la ficha.
+
+| Variable | Descripción |
+|---|---|
+| `NOTIFICAR_CLIENTE` | `true` (def.) envía la confirmación al cliente al crear |
+| `MAX_AGENCIAS_LISTA` | Hasta cuántas agencias se le listan al cliente (def. 10) |
+| `AGENCIAS_OFRECIDAS_PATH` | Registro de listas enviadas a clientes (usar volumen) |
+| `GEOCODER` | `nominatim` (def.) u `off` |
+| `GEOCODER_UA` | User-Agent para Nominatim (def. `ventas-bot/1.0`) |
+| `DROPI_DIAS_DUPLICADO` | Días revisados para no duplicar (def. 3) |
+| `PEDIDOS_CREADOS_PATH` | Registro local de pedidos creados (usar volumen) |
 
 ## Despliegue en Coolify
 

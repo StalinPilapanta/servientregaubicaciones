@@ -12,10 +12,12 @@ Comandos:
   /pedido <telefono>  -> "Resumen del pedido - Datos de envio" de un cliente
   /campos <telefono>  -> muestra todos los campos guardados del cliente
   /ficha <telefono>   -> ficha de la venta (promo + agencia detectada) con botones
-  /crear <telefono>   -> crea el pedido en Dropi (via Hermes) si la ficha esta completa
+  /crear <telefono>   -> resumen + confirmar para crear el pedido en Dropi (MCP)
 
 Cada venta nueva llega a Telegram como ficha con botones:
   [Crear pedido en Dropi] [agencias alternativas] [Reanalizar]
+"Crear" muestra el resumen (ciudad/departamento Dropi + envio Servientrega) y
+solo crea el pedido al pulsar "Si, crear en Dropi".
 
 Usa long polling (getUpdates), asi que NO necesita webhook ni dominio publico.
 Se controla el acceso con AUTHORIZED_CHAT_IDS (solo tu chat puede usarlo).
@@ -32,9 +34,9 @@ Variables de entorno:
   OPENAI_MODEL           modelo (def. gpt-4o-mini)
   AGENCIAS_API_URL       servicio de agencias (def. https://servientrega.neolabsgroup.io)
   AGENCIAS_TOKEN         token opcional del servicio de agencias
-  HERMES_URL             endpoint de Hermes que crea el pedido en Dropi (MCP)
-  HERMES_TOKEN           token opcional de Hermes
-  HERMES_TIMEOUT         segundos de espera a Hermes (def. 120)
+  GEOCODER               "nominatim" (def.) u "off": agencia mas cercana a la referencia
+  DROPI_DIAS_DUPLICADO   dias que se revisan en Dropi para no duplicar (def. 3)
+  (los pedidos se crean con el MCP de Dropi: ver dropi_mcp.py / dropi_pedido.py)
   PEDIDOS_CREADOS_PATH   registro anti-duplicados de pedidos creados
 """
 
@@ -56,6 +58,7 @@ import requests
 import chateapro
 import ficha
 import dropi_mcp
+import dropi_pedido
 import reporte_agencia
 
 try:
@@ -182,41 +185,77 @@ def _campos_por_telefono(telefono):
     return None
 
 
-def _ejecutar_creacion(chat_id, message_id, a):
-    """Corre en un hilo: delega a Hermes y reporta el resultado en Telegram."""
-    ns = a["ns"]
-    try:
-        res = ficha.crear_pedido(a)
-    except Exception as e:  # nunca dejar el ns bloqueado
-        res = {"ok": False, "order_id": None, "guia": None, "mensaje": str(e)}
-    finally:
-        with _creando_lock:
-            _creando.discard(ns)
+def _ocupado(ns):
+    with _creando_lock:
+        return ns in _creando
 
+
+def _correr_en_hilo(chat_id, message_id, a, fn):
+    """Corre fn(chat_id, message_id, a) en un hilo con candado por suscriptor."""
+    with _creando_lock:
+        if a["ns"] in _creando:
+            return False
+        _creando.add(a["ns"])
+
+    def envoltura():
+        try:
+            fn(chat_id, message_id, a)
+        except dropi_mcp.AuthRequired:
+            _pedir_conexion_dropi(chat_id, "🔐 Dropi pide iniciar sesión para crear el pedido.\n"
+                                           "Al conectar, vuelve a pulsar «Crear pedido en Dropi».")
+            if message_id:
+                editar_plano(chat_id, message_id, ficha.texto_ficha(a), ficha.teclado(a))
+        except Exception as e:
+            print("Error creando pedido:", e)
+            enviar_plano(chat_id, f"❌ Error con Dropi: {e}\n"
+                                  "Antes de reintentar revisa en Dropi que no se haya creado.")
+            if message_id:
+                editar_plano(chat_id, message_id, ficha.texto_ficha(a), ficha.teclado(a))
+        finally:
+            with _creando_lock:
+                _creando.discard(a["ns"])
+
+    threading.Thread(target=envoltura, daemon=True).start()
+    return True
+
+
+def _preparar(chat_id, message_id, a):
+    """Paso 1: ciudad/departamento Dropi + cotizacion -> pide confirmacion."""
+    ok, msg = ficha.preparar(a)
+    if not ok:
+        texto = ficha.texto_ficha(a) + f"\n\n❌ No se puede crear: {msg}"
+        if message_id:
+            editar_plano(chat_id, message_id, texto, ficha.teclado(a))
+        else:
+            enviar_plano(chat_id, texto, ficha.teclado(a))
+        return
+    if message_id:
+        editar_plano(chat_id, message_id, ficha.texto_confirmacion(a),
+                     ficha.teclado_confirmacion(a))
+    else:
+        enviar_plano(chat_id, ficha.texto_confirmacion(a), ficha.teclado_confirmacion(a))
+
+
+def _crear(chat_id, message_id, a):
+    """Paso 2: create_order con el MCP de Dropi y reporte del resultado."""
+    res = ficha.crear_pedido(a)
+    a["preparado"] = None
     if res["ok"]:
         txt = f"✅ Pedido creado en Dropi: #{res['order_id']}\n👤 {_nombre_de(a)}"
-        if res.get("guia"):
-            txt += f"\n🔖 Guía: {res['guia']}"
+        if res.get("mensaje"):
+            txt += f"\n{res['mensaje']}"
+        noti = res.get("notificacion")
+        if noti and noti[0]:
+            txt += "\n📲 Confirmación enviada al cliente por WhatsApp."
+        elif noti:
+            txt += (f"\n⚠️ No se pudo enviar la confirmación al cliente ({noti[1]}). "
+                    "Envíasela a mano desde Chatea Pro.")
     else:
         txt = (f"❌ No se creó el pedido de {_nombre_de(a)}.\n{res['mensaje']}\n"
                "Antes de reintentar revisa en Dropi que no se haya creado.")
     enviar_plano(chat_id, txt)
     if message_id:
         editar_plano(chat_id, message_id, ficha.texto_ficha(a), ficha.teclado(a))
-
-
-def _iniciar_creacion(chat_id, message_id, a):
-    """Valida y lanza la creacion en un hilo. Devuelve (ok, mensaje)."""
-    motivos = ficha.bloqueos(a)
-    if motivos:
-        return False, "; ".join(motivos)
-    with _creando_lock:
-        if a["ns"] in _creando:
-            return False, "Ya se está creando este pedido."
-        _creando.add(a["ns"])
-    threading.Thread(target=_ejecutar_creacion, args=(chat_id, message_id, a),
-                     daemon=True).start()
-    return True, "Creando pedido en Dropi..."
 
 
 def _ficha_de(ns, forzar=False):
@@ -231,7 +270,7 @@ def _ficha_de(ns, forzar=False):
 
 
 def manejar_callback(cb):
-    """Atiende los botones de la ficha: crear:<ns>, ag:<ns>:<i>, re:<ns>."""
+    """Botones: crear, ok, x, ag:<i>, re, ps (pedir agencia), va (ver agencias)."""
     cb_id = cb.get("id")
     msg = cb.get("message") or {}
     chat_id = (msg.get("chat") or {}).get("id")
@@ -261,12 +300,55 @@ def manejar_callback(cb):
                 responder_callback(cb_id, "Esa opción ya no existe, pulsa Reanalizar", True)
         elif accion == "crear":
             a = _ficha_de(ns)
-            ok, texto = _iniciar_creacion(chat_id, message_id, a)
-            responder_callback(cb_id, texto, not ok)
-            if ok and message_id:
+            motivos = ficha.bloqueos(a)
+            if motivos:
+                responder_callback(cb_id, "; ".join(motivos), True)
+                return
+            if _ocupado(ns):
+                responder_callback(cb_id, "Ya se está procesando este pedido.", True)
+                return
+            responder_callback(cb_id, "Preparando el pedido...")
+            # Primero el aviso y DESPUES el hilo: si no, el aviso puede tapar el resultado.
+            if message_id:
+                editar_plano(chat_id, message_id, ficha.texto_ficha(a)
+                             + "\n\n⏳ Ubicando ciudad en Dropi y cotizando Servientrega...")
+            _correr_en_hilo(chat_id, message_id, a, _preparar)
+        elif accion == "ok":
+            a = _ficha_de(ns)
+            if not a.get("preparado"):
+                responder_callback(cb_id, "La confirmación venció, pulsa Crear de nuevo.", True)
+                editar_plano(chat_id, message_id, ficha.texto_ficha(a), ficha.teclado(a))
+                return
+            if _ocupado(ns):
+                responder_callback(cb_id, "Ya se está creando este pedido.", True)
+                return
+            responder_callback(cb_id, "Creando pedido en Dropi...")
+            if message_id:
                 # Quita los botones mientras se crea (evita doble clic).
                 editar_plano(chat_id, message_id,
-                             ficha.texto_ficha(a) + "\n\n⏳ Creando pedido en Dropi...")
+                             ficha.texto_confirmacion(a) + "\n\n⏳ Creando pedido en Dropi...")
+            _correr_en_hilo(chat_id, message_id, a, _crear)
+        elif accion == "va":
+            a = _ficha_de(ns)
+            n = ficha.ver_agencias(a)
+            responder_callback(cb_id, f"{n} agencias en la ciudad" if n else "Sin agencias")
+            editar_plano(chat_id, message_id, ficha.texto_ficha(a), ficha.teclado(a))
+        elif accion == "ps":
+            a = _ficha_de(ns)
+            ok, det = ficha.pedir_agencia(a)
+            if ok:
+                responder_callback(cb_id, "Mensaje enviado al cliente")
+                texto, _ = ficha.mensaje_pedir_agencia(a)
+                enviar_plano(chat_id, f"📲 Le pedí la agencia a {_nombre_de(a)}:\n\n{texto}\n\n"
+                                      "Cuando responda, toca «Reanalizar» en la ficha.")
+            else:
+                responder_callback(cb_id, "No se pudo enviar", True)
+                enviar_plano(chat_id, f"⚠️ No se pudo escribir a {_nombre_de(a)}: {det}")
+        elif accion == "x":
+            a = _ficha_de(ns)
+            a["preparado"] = None
+            responder_callback(cb_id, "Cancelado")
+            editar_plano(chat_id, message_id, ficha.texto_ficha(a), ficha.teclado(a))
         else:
             responder_callback(cb_id, "Acción desconocida", True)
     except Exception as e:
@@ -331,20 +413,12 @@ def manejar_comando(chat_id, texto):
                "• /resumen dd/mm/aaaa — ventas de una fecha\n"
                "• /ventas — lista de pedidos\n"
                "• /ventas dd/mm/aaaa — pedidos por fecha\n"
-               "• /pendientes — pedidos pendientes\n"
-               "• /retiro — pedidos disponibles para retiro en Servientrega\n"
                "• /en_agencia — reporte HTML de pedidos en agencia Servientrega "
                "(Dropi MCP) con botón de WhatsApp\n"
                "• /dropi_conectar — iniciar sesión en Dropi (MCP)\n"
-               "• /seguimiento ayer, fecha o 'todos' — CSV de retiros (días sin retirar)\n"
                "• /reporte_diario — reporte completo del día (resumen + ventas + retiros)\n"
-               "• /pedido <teléfono> — datos de envío de un cliente\n"
-               "• /campos <teléfono> — ver todos los campos de un cliente\n"
-               "• /guia <número> — movimientos Servientrega (Dropi directo)\n"
-               "• /dropi_pedidos [estado] — pedidos directo de Dropi\n"
-               "• /dropi_saldo — saldo de cartera Dropi\n"
-               "• /ficha <teléfono> — ficha de la venta (promo + agencia) con botones\n"
-               "• /crear <teléfono> — crea el pedido en Dropi (vía Hermes) si está completo")
+               "• /guia <número> — estado de una guía en Dropi\n"
+               "• /dropi_pedidos [estado] [n] — pedidos de Dropi (últimos 30 días) + CSV")
         return
 
     if cmd == "/en_agencia":
@@ -438,13 +512,14 @@ def manejar_comando(chat_id, texto):
             if cmd == "/ficha":
                 enviar_ficha(chat_id, a)
                 return
-            # /crear: si algo bloquea, muestra la ficha para que veas por que.
-            ok, mensaje = _iniciar_creacion(chat_id, None, a)
-            if ok:
-                enviar_plano(chat_id, f"⏳ Creando pedido de {_nombre_de(a)} en Dropi...")
-            else:
-                enviar_plano(chat_id, f"⚠️ No se creó: {mensaje}")
+            # /crear: si algo bloquea, muestra la ficha para que veas por que;
+            # si no, muestra el resumen con el boton de confirmar.
+            motivos = ficha.bloqueos(a)
+            if motivos:
+                enviar_plano(chat_id, "⚠️ No se puede crear: " + "; ".join(motivos))
                 enviar_ficha(chat_id, a)
+            elif not _correr_en_hilo(chat_id, None, a, _preparar):
+                enviar_plano(chat_id, "Ya se está procesando este pedido.")
         except Exception as e:
             enviar(chat_id, f"❌ Error: {e}")
         return
@@ -603,68 +678,22 @@ def manejar_comando(chat_id, texto):
     if cmd == "/guia":
         partes = texto.split(maxsplit=1)
         if len(partes) < 2:
-            enviar(chat_id, "Uso: /guia <número>  (ej: /guia 189832507)")
+            enviar(chat_id, "Uso: /guia <número>  (ej: /guia 1800151524)")
             return
-        if not _DROPI_OK:
-            enviar(chat_id, "Dropi directo no configurado (faltan DROPI_EMAIL / DROPI_PASSWORD).")
-            return
-        numero = partes[1].strip()
-        enviar(chat_id, f"⏳ Consultando guía {numero} en Dropi...")
-        try:
-            movs = dropi.movimientos_guia(numero)
-            if not movs:
-                enviar(chat_id, f"No existe la guía {numero} en Dropi.")
-                return
-            lineas = [f"📦 *Guía {numero}* ({len(movs)} movimientos)\n"]
-            for m in movs[-10:]:
-                lineas.append(
-                    f"• {m.get('NomMov', '-')} — {m.get('FecMov', '')}\n"
-                    f"  {m.get('OriMov', '')} → {m.get('DesMov', '')}"
-                )
-            enviar(chat_id, "\n".join(lineas))
-        except Exception as e:
-            enviar(chat_id, f"❌ Error al consultar la guía: {e}")
+        enviar_plano(chat_id, f"⏳ Buscando la guía {partes[1].strip()} en Dropi...")
+        threading.Thread(target=_guia_mcp, args=(chat_id, partes[1].strip()),
+                         daemon=True).start()
         return
 
     if cmd == "/dropi_pedidos":
-        if not _DROPI_OK:
-            enviar(chat_id, "Dropi directo no configurado (faltan DROPI_EMAIL / DROPI_PASSWORD).")
-            return
-        partes = texto.split(maxsplit=2)
-        estado = partes[1].upper() if len(partes) > 1 else None
-        try:
-            n = int(partes[2]) if len(partes) > 2 else 15
-        except ValueError:
-            n = 15
-        filtros = {"status": estado} if estado else None
-        enviar(chat_id, "⏳ Consultando pedidos en Dropi...")
-        try:
-            items, total = dropi.objetos_ordenes(
-                dropi.listar_mis_ordenes(page=1, per_page=min(n, 50),
-                                         filtros=filtros))
-            if not items:
-                enviar(chat_id, "Sin pedidos para ese filtro en Dropi.")
-                return
-            titulo = f"📦 *Pedidos Dropi{f' ({estado})' if estado else ''}*\n"
-            lineas = [titulo]
-            for o in items:
-                nombre = f"{o.get('name', '')} {o.get('surname', '')}".strip() or "-"
-                lineas.append(
-                    f"• #{o.get('id')} — {nombre}\n"
-                    f"  📲 {o.get('phone', '-')} — 📍 {o.get('city', '-')}\n"
-                    f"  {o.get('status', '-')} — ${o.get('total_order', '-')} — "
-                    f"guía {o.get('shipping_guide') or '-'}"
-                )
-            enviar(chat_id, "\n".join(lineas))
-            filas = [{
-                "id": o.get("id"), "nombre": f"{o.get('name', '')} {o.get('surname', '')}".strip(),
-                "telefono": o.get("phone"), "ciudad": o.get("city"),
-                "estado": o.get("status"), "valor": o.get("total_order"),
-                "guia": o.get("shipping_guide") or "",
-            } for o in items]
-            _enviar_csv(chat_id, filas, f"📦 Pedidos Dropi{f' ({estado})' if estado else ''} (total: {total})")
-        except Exception as e:
-            enviar(chat_id, f"❌ Error al listar pedidos Dropi: {e}")
+        partes = texto.split()[1:]
+        n = 15
+        if partes and partes[-1].isdigit():
+            n = int(partes.pop())
+        estado = " ".join(partes).upper() or None
+        enviar_plano(chat_id, "⏳ Consultando pedidos en Dropi...")
+        threading.Thread(target=_dropi_pedidos_mcp, args=(chat_id, estado, n),
+                         daemon=True).start()
         return
 
     if cmd == "/dropi_saldo":
@@ -706,6 +735,62 @@ def _pedir_conexion_dropi(chat_id, motivo):
                   "pégala aquí en el chat.\n")
     texto += "\nEl link vence en 15 minutos."
     enviar_plano(chat_id, texto, [[{"text": "🔐 Iniciar sesión en Dropi", "url": url}]])
+
+
+def _guia_mcp(chat_id, numero):
+    """/guia: pedido de Dropi con esa guia (MCP)."""
+    try:
+        p = dropi_pedido.buscar_guia(numero)
+    except dropi_mcp.AuthRequired:
+        _pedir_conexion_dropi(chat_id, "🔐 Dropi pide iniciar sesión para consultar la guía.")
+        return
+    except Exception as e:
+        enviar_plano(chat_id, f"❌ Error consultando la guía: {e}")
+        return
+    if not p:
+        enviar_plano(chat_id, f"No encontré la guía {numero} en Dropi (últimos 90 días).")
+        return
+    cli = p.get("customer") or {}
+    L = [f"📦 Guía {p.get('tracking_code') or numero} — pedido #{p.get('order_id')}",
+         f"🚚 {p.get('shipping_company') or '-'} · {p.get('status', '-')}",
+         f"👤 {cli.get('name', '-')} · 📲 {cli.get('phone', '-')}",
+         f"📍 {cli.get('city', '-')}: {cli.get('address', '-')}", ""]
+    for it in p.get("items") or []:
+        L.append(f"• {it.get('qty')}x {it.get('product_name')} (${it.get('unit_price')})")
+    L += [f"💵 Total ${p.get('total')} {p.get('currency', '')}",
+          f"🗓️ Creado {str(p.get('created_at', ''))[:16].replace('T', ' ')} · "
+          f"actualizado {str(p.get('updated_at', ''))[:16].replace('T', ' ')}"]
+    enviar_plano(chat_id, "\n".join(L))
+
+
+def _dropi_pedidos_mcp(chat_id, estado, n):
+    """/dropi_pedidos [ESTADO] [n]: pedidos de los ultimos 30 dias (MCP) + CSV."""
+    try:
+        items = dropi_pedido.listar_pedidos(estado, n)
+    except dropi_mcp.AuthRequired:
+        _pedir_conexion_dropi(chat_id, "🔐 Dropi pide iniciar sesión para listar pedidos.")
+        return
+    except Exception as e:
+        enviar_plano(chat_id, f"❌ Error al listar pedidos Dropi: {e}")
+        return
+    filtro = f" ({estado})" if estado else ""
+    if not items:
+        enviar_plano(chat_id, f"Sin pedidos{filtro} en Dropi en los últimos 30 días.\n"
+                              "Estados válidos: PENDIENTE, GUIA_GENERADA, ENTREGADO, "
+                              "PARA RETIRO EN AGENCIA SERVIENTREGA, NOVEDAD, CANCELADO…")
+        return
+    L = [f"📦 Pedidos Dropi{filtro}: {len(items)}", ""]
+    for o in items[:30]:
+        L.append(f"• #{o.get('order_id')} {o.get('customer_name', '-')} — "
+                 f"{o.get('city', '-')}\n  {o.get('status', '-')} · ${o.get('total')} · "
+                 f"{o.get('shipping_company', '-')} · guía {o.get('tracking_code') or '-'}")
+    enviar_plano(chat_id, "\n".join(L)[:4000])
+    filas = [{"pedido": o.get("order_id"), "fecha": o.get("created_at"),
+              "nombre": o.get("customer_name"), "telefono": o.get("customer_phone"),
+              "ciudad": o.get("city"), "estado": o.get("status"), "valor": o.get("total"),
+              "transportadora": o.get("shipping_company"),
+              "guia": o.get("tracking_code") or ""} for o in items]
+    _enviar_csv(chat_id, filas, f"📦 Pedidos Dropi{filtro}")
 
 
 def _reporte_en_agencia(chat_id):
@@ -803,15 +888,9 @@ MENU_COMANDOS = [
     ("en_agencia", "Pedidos en agencia Servientrega (HTML + WhatsApp)"),
     ("resumen", "Ventas de hoy"),
     ("ventas", "Lista de pedidos de hoy"),
-    ("pendientes", "Pedidos pendientes"),
-    ("retiro", "Disponibles para retiro (Chatea Pro)"),
-    ("seguimiento", "CSV de retiros (ayer, fecha o todos)"),
     ("reporte_diario", "Reporte completo del día"),
-    ("pedido", "Datos de envío: /pedido <teléfono>"),
-    ("ficha", "Ficha de la venta: /ficha <teléfono>"),
-    ("guia", "Movimientos de una guía"),
-    ("dropi_pedidos", "Pedidos directo de Dropi"),
-    ("dropi_saldo", "Saldo de cartera Dropi"),
+    ("guia", "Estado de una guía: /guia <número>"),
+    ("dropi_pedidos", "Pedidos de Dropi (MCP) + CSV"),
     ("dropi_conectar", "Iniciar sesión en Dropi (MCP)"),
     ("ayuda", "Ver todos los comandos"),
 ]

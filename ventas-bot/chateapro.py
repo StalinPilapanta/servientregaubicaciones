@@ -777,3 +777,27 @@ def separar_nombre(nombre_completo):
         return partes[0], ""
     corte = 1 if len(partes) <= 3 else 2
     return " ".join(partes[:corte]), " ".join(partes[corte:])
+
+
+# ------------------------------------------------------------- escritura --
+
+def enviar_texto(user_ns, texto):
+    """
+    Envia un mensaje de texto al cliente por su canal (WhatsApp) via
+    POST /subscriber/send-text. Devuelve (ok, detalle).
+    WhatsApp solo permite texto libre dentro de las 24h desde el ultimo
+    mensaje del cliente; fuera de esa ventana Chatea Pro devuelve error.
+    """
+    try:
+        r = requests.post(BASE_URL + "/subscriber/send-text", headers=_headers(),
+                          json={"user_ns": user_ns, "content": texto}, timeout=30)
+    except requests.RequestException as e:
+        return False, f"No se pudo contactar Chatea Pro: {e}"
+    try:
+        d = r.json()
+    except ValueError:
+        d = {}
+    if r.status_code >= 400 or (isinstance(d, dict) and d.get("status") not in (None, "ok")):
+        msg = (d.get("message") or d.get("error") or r.text[:200]) if isinstance(d, dict) else r.text[:200]
+        return False, f"Chatea Pro respondió {r.status_code}: {msg}"
+    return True, "enviado"
