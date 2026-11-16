@@ -9,9 +9,26 @@ Ademas integra **Dropi**: cada pedido aparece en Chatea Pro como un campo
 orden de Dropi. El bot detecta las guias con estatus **"PARA RETIRO EN AGENCIA
 SERVIENTREGA"** y lleva su seguimiento (dias sin retirar).
 
+## Asistente (texto libre y audios)
+
+Escríbele al bot sin "/" o mándale una nota de voz: «¿qué pedidos siguen
+pendientes en Dropi?», «busca a Hugo», «¿cuánto stock queda de Mega Red?»,
+«¿cuánto cuesta el envío a Macas?», «¿qué agencias hay en Babahoyo?».
+Lo responde Claude (`asistente.py`, modelo `claude-haiku-5-5`) consultando
+Chatea Pro, Dropi y el directorio de agencias. Recuerda la conversación 30 min;
+`/nuevo` la reinicia.
+
+Solo consulta. Si le pides crear un pedido muestra la ficha con sus botones; si
+le pides escribirle a un cliente muestra el borrador con «Enviar por WhatsApp» /
+«Descartar». Nada sale sin que pulses el botón.
+
+Las notas de voz se transcriben con Groq o OpenAI (`transcribir.py`), porque
+Claude no recibe audio, y el texto pasa al asistente.
+
 ## Comandos (menú)
 
 - `/start` — menu de ayuda
+- `/nuevo` — nueva conversación con el asistente
 - `/resumen` — estadisticas del dia (ventas, facturacion, producto mas vendido)
 - `/ventas` — lista de pedidos de hoy
 - `/en_agencia` — reporte HTML de pedidos en agencia Servientrega (MCP) con botón de WhatsApp
@@ -54,6 +71,12 @@ El bot guarda dos archivos locales:
 | `DROPI_EMAIL` / `DROPI_PASSWORD` | Cuenta Dropi para conexion directa (reportes/gestion) |
 | `DROPI_MFA_CODE` | Codigo MFA fresco, solo al hacer login (vence en ~30s) |
 | `DROPI_COUNTRY_CODE` | Pais de la cuenta (def. `ec`, header X-Host) |
+| `ANTHROPIC_API_KEY` | Clave de Claude para el asistente (sin ella el asistente se apaga) |
+| `ASISTENTE_MODELO` | Modelo del asistente (def. `claude-haiku-5-5`) |
+| `ASISTENTE_ESFUERZO` | `low` (def.), `medium` o `high` |
+| `GROQ_API_KEY` | Transcripción de audios con Groq Whisper (se usa primero) |
+| `OPENAI_API_KEY` | Transcripción de audios con OpenAI si no hay Groq (y análisis IA de la ficha) |
+| `TRANSCRIPCION_MODELO` | Cambia el modelo de transcripción (opcional) |
 
 ## Dropi directo (`dropi.py`)
 

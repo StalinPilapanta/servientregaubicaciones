@@ -32,6 +32,8 @@ Variables de entorno:
   RETIROS_HISTORICO_PATH ruta del historico de guias en retiro (no perder data)
   OPENAI_API_KEY         clave de OpenAI (promo + ubicacion desde el chat)
   OPENAI_MODEL           modelo (def. gpt-4o-mini)
+  ANTHROPIC_API_KEY      asistente conversacional (texto libre y audios), ver asistente.py
+  GROQ_API_KEY           transcripcion de notas de voz (o OPENAI_API_KEY), ver transcribir.py
   AGENCIAS_API_URL       servicio de agencias (def. https://servientrega.neolabsgroup.io)
   AGENCIAS_TOKEN         token opcional del servicio de agencias
   GEOCODER               "nominatim" (def.) u "off": agencia mas cercana a la referencia
@@ -60,6 +62,8 @@ import ficha
 import dropi_mcp
 import dropi_pedido
 import reporte_agencia
+import asistente
+import transcribir
 
 try:
     import dropi
@@ -287,6 +291,9 @@ def manejar_callback(cb):
         return
 
     try:
+        if accion in ("wa", "wx"):
+            _callback_borrador(cb_id, chat_id, message_id, accion, ns)
+            return
         if accion == "re":
             a = _ficha_de(ns, forzar=True)
             responder_callback(cb_id, "Ficha actualizada")
@@ -401,13 +408,39 @@ def _parse_arg_fecha(texto):
     return None
 
 
+_COMANDOS = (
+    "/start", "/ayuda", "/help", "/nuevo", "/en_agencia", "/dropi_conectar",
+    "/dropi_desconectar", "/resumen", "/ventas", "/pedido", "/ficha", "/crear",
+    "/pendientes", "/retiro", "/campos", "/seguimiento", "/reporte_diario", "/guia",
+    "/dropi_pedidos", "/dropi_saldo",
+)
+# "/dropipedidos" -> "/dropi_pedidos" (copias del menu viejo sin guion bajo).
+_SIN_GUION = {c.replace("_", ""): c for c in _COMANDOS}
+
+
+def _normalizar_cmd(cmd):
+    cmd = cmd.split("@", 1)[0]  # /resumen@VitashopBot -> /resumen
+    return cmd if cmd in _COMANDOS else _SIN_GUION.get(cmd.replace("_", ""), cmd)
+
+
 def manejar_comando(chat_id, texto):
     texto = (texto or "").strip()
-    cmd = texto.split()[0].lower() if texto else ""
+    cmd = _normalizar_cmd(texto.split()[0].lower()) if texto else ""
+
+    if cmd == "/nuevo":
+        asistente.olvidar(chat_id)
+        enviar_plano(chat_id, "🆕 Listo, empecemos de nuevo. ¿Qué necesitas?")
+        return
 
     if cmd in ("/start", "/ayuda", "/help"):
-        enviar(chat_id,
-               "👋 *Bot de ventas VitashopEc*\n\n"
+        # Sin Markdown: los guiones bajos de /en_agencia o /dropi_pedidos se
+        # tomaban como cursiva y Telegram mostraba /enagencia, /dropipedidos.
+        enviar_plano(chat_id,
+               "👋 Bot de ventas VitashopEc\n\n"
+               "💬 Puedes escribirme o mandarme un audio con lo que necesites, por ejemplo:\n"
+               "«¿qué pedidos siguen pendientes en Dropi?», «busca a Hugo Montenegro», "
+               "«¿cuánto stock queda de Mega Red?», «¿qué agencias hay en Babahoyo?».\n"
+               "/nuevo — empezar una conversación nueva con el asistente\n\n"
                "Comandos disponibles:\n"
                "• /resumen — ventas de hoy\n"
                "• /resumen dd/mm/aaaa — ventas de una fecha\n"
@@ -892,6 +925,7 @@ MENU_COMANDOS = [
     ("guia", "Estado de una guía: /guia <número>"),
     ("dropi_pedidos", "Pedidos de Dropi (MCP) + CSV"),
     ("dropi_conectar", "Iniciar sesión en Dropi (MCP)"),
+    ("nuevo", "Nueva conversación con el asistente"),
     ("ayuda", "Ver todos los comandos"),
 ]
 
@@ -1064,6 +1098,110 @@ def revisar_ventas_nuevas():
     _primera_pasada = False
 
 
+# --- Asistente conversacional (texto libre y notas de voz) ---
+
+# Borradores de WhatsApp propuestos por el asistente: id -> {ns, texto, ts}
+_borradores = {}
+_borradores_lock = threading.Lock()
+_un_turno = {}  # chat_id -> Lock: una pregunta a la vez por chat
+
+
+def _escribiendo(chat_id):
+    try:
+        requests.post(f"{TG_API}/sendChatAction",
+                      data={"chat_id": chat_id, "action": "typing"}, timeout=10)
+    except Exception:
+        pass
+
+
+def _guardar_borrador(ns, texto):
+    bid = f"{int(time.time() * 1000) % 10**10:x}"
+    with _borradores_lock:
+        ahora = time.time()
+        for k in [k for k, v in _borradores.items() if ahora - v["ts"] > 86400]:
+            _borradores.pop(k, None)
+        _borradores[bid] = {"ns": ns, "texto": texto, "ts": ahora}
+    return bid
+
+
+def _atender_asistente(chat_id, texto):
+    if not asistente.disponible():
+        enviar_plano(chat_id, "🤖 El asistente no está activo (falta ANTHROPIC_API_KEY).\n"
+                              "Mientras tanto usa los comandos: /ayuda")
+        return
+    candado = _un_turno.setdefault(chat_id, threading.Lock())
+    with candado:
+        _escribiendo(chat_id)
+        try:
+            respuesta, acciones = asistente.responder(chat_id, texto)
+        except Exception as e:
+            print("Error en asistente:", e)
+            asistente.olvidar(chat_id)
+            enviar_plano(chat_id, f"❌ El asistente falló: {e}")
+            return
+        enviar_plano(chat_id, respuesta[:4000])
+        for acc in acciones:
+            try:
+                _accion_asistente(chat_id, acc)
+            except Exception as e:
+                enviar_plano(chat_id, f"❌ No pude mostrar la acción: {e}")
+
+
+def _accion_asistente(chat_id, acc):
+    if acc["tipo"] == "ficha":
+        enviar_ficha(chat_id, _ficha_de(acc["ns"], forzar=True))
+    elif acc["tipo"] == "mensaje":
+        campos = chateapro.obtener_campos(acc["ns"])
+        nombre = campos.get(chateapro.CAMPO_NOMBRE) or campos.get("_name") or acc["ns"]
+        bid = _guardar_borrador(acc["ns"], acc["texto"])
+        enviar_plano(chat_id,
+                     f"✉️ Borrador para {nombre} ({campos.get('_phone', '-')}):\n\n"
+                     f"{acc['texto']}",
+                     [[{"text": "📲 Enviar por WhatsApp", "callback_data": f"wa:{bid}"},
+                       {"text": "✖️ Descartar", "callback_data": f"wx:{bid}"}]])
+    elif acc["tipo"] == "conectar_dropi":
+        _pedir_conexion_dropi(chat_id, "🔐 Dropi pide iniciar sesión para responderte.")
+
+
+def _atender_audio(chat_id, msg):
+    if not transcribir.disponible():
+        enviar_plano(chat_id, "🎙️ Para entender audios falta GROQ_API_KEY u OPENAI_API_KEY.")
+        return
+    media = msg.get("voice") or msg.get("audio")
+    _escribiendo(chat_id)
+    try:
+        info = requests.get(f"{TG_API}/getFile", params={"file_id": media["file_id"]},
+                            timeout=30).json()["result"]
+        url = f"https://api.telegram.org/file/bot{TG_TOKEN}/{info['file_path']}"
+        contenido = requests.get(url, timeout=60).content
+        texto = transcribir.transcribir(contenido, info["file_path"].rsplit("/", 1)[-1],
+                                        media.get("mime_type") or "audio/ogg")
+    except Exception as e:
+        enviar_plano(chat_id, f"❌ No pude entender el audio: {e}")
+        return
+    enviar_plano(chat_id, f"🎙️ Entendí: «{texto}»")
+    _atender_asistente(chat_id, texto)
+
+
+def _callback_borrador(cb_id, chat_id, message_id, accion, bid):
+    with _borradores_lock:
+        b = _borradores.pop(bid, None)
+    if b is None:
+        responder_callback(cb_id, "Ese borrador ya no existe.", True)
+        return
+    if accion == "wx":
+        responder_callback(cb_id, "Descartado")
+        editar_plano(chat_id, message_id, f"✖️ Borrador descartado:\n\n{b['texto']}")
+        return
+    responder_callback(cb_id, "Enviando...")
+    ok, det = chateapro.enviar_texto(b["ns"], b["texto"])
+    if ok:
+        editar_plano(chat_id, message_id, f"✅ Enviado por WhatsApp:\n\n{b['texto']}")
+    else:
+        editar_plano(chat_id, message_id,
+                     f"❌ No se envió ({det}). Envíalo a mano desde Chatea Pro:\n\n{b['texto']}")
+
+
 def main():
     if not TG_TOKEN:
         raise SystemExit("Falta TELEGRAM_BOT_TOKEN")
@@ -1104,6 +1242,14 @@ def main():
                 continue
             if dropi_mcp.es_url_callback(texto):
                 _procesar_url_dropi(chat_id, texto)
+                continue
+            if msg.get("voice") or msg.get("audio"):
+                threading.Thread(target=_atender_audio, args=(chat_id, msg),
+                                 daemon=True).start()
+                continue
+            if texto and not texto.startswith("/"):
+                threading.Thread(target=_atender_asistente, args=(chat_id, texto),
+                                 daemon=True).start()
                 continue
             manejar_comando(chat_id, texto)
 
