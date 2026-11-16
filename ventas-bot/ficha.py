@@ -156,12 +156,22 @@ def analizar(campos, forzar=False):
     except Exception as e:
         aviso_dropi = f"No pude revisar duplicados en Dropi: {_recorta(str(e), 80)}"
 
+    # --- Dropi: historial del comprador (entrega / devolucion) ---
+    perfil, error_perfil = None, ""
+    try:
+        perfil = dropi_pedido.perfil_cliente(campos.get("_phone", ""))
+    except dropi_mcp.AuthRequired:
+        error_perfil = "Dropi no conectado: no pude ver el historial del cliente."
+    except Exception as e:
+        error_perfil = f"No pude ver el historial del cliente: {_recorta(str(e), 80)}"
+
     a = {
         "ns": ns, "campos": campos, "chat": chat, "error_chat": error_chat,
         "ia": analisis_ia, "promo": promo, "promo_origen": origen,
         "avisos_promo": avisos_promo, "agencia_res": res, "geo": geo,
         "opciones": opciones, "elegida": elegida,
         "dropi_existente": existente, "aviso_dropi": aviso_dropi,
+        "perfil": perfil, "error_perfil": error_perfil,
         "preparado": None,
     }
     _CACHE[ns] = a
@@ -341,12 +351,17 @@ def texto_ficha(a):
         estado = "⚠️ REVISAR ANTES DE CREAR"
 
     L = [f"🔔 NUEVA VENTA — {estado}", ""]
+    if (a.get("perfil") or {}).get("alerta"):
+        L += [f"⚠️ CLIENTE CON DEVOLUCIONES: {a['perfil']['devolucion']:.0f}% de sus pedidos "
+              "los devolvió. Confirma antes de crear.", ""]
     if a["ia"]["quiere_cancelar"]:
         L += ["🚫 OJO: el cliente parece querer CANCELAR. Revisa el chat.", ""]
 
     L += [
         f"👤 {nombre}",
         f"📲 {c.get('_phone', '-')}",
+        (f"ℹ️ {a['error_perfil']}" if a.get("error_perfil")
+         else dropi_pedido.texto_perfil(a.get("perfil"))),
         f"🛍️ CRM: {c.get(chateapro.CAMPO_PRODUCTOS, '-')} — ${c.get(chateapro.CAMPO_VALOR, '-')}",
         "",
     ]

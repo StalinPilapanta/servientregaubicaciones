@@ -233,7 +233,7 @@ def generar_html(pedidos):
         filas.append(f"""<tr class="fila{alerta}" data-guia="{e(p['guia'])}">
 <td class="n">{i}</td>
 <td><span class="fecha">{e(p['creado'][:10])}</span><span class="dias">{dias_txt}</span></td>
-<td class="cli"><b>{e(p['nombre'])}</b><a class="tel" href="tel:0{e(p['telefono'])}">0{e(p['telefono'])}</a></td>
+<td class="cli"><b>{e(p['nombre'])}</b><a class="tel" href="tel:+593{e(p['telefono'])}">{e(p['telefono'])}</a></td>
 <td>{e(p['ciudad'])}<small>{e(ag['nombre'])}<br>{e(ag['direccion'])}<br>🕒 {e(ag['horario'])}</small></td>
 <td class="guia">{e(p['guia'])}<small>#{e(p['order_id'])}</small></td>
 <td>{e(p['producto'])}<small>${e(str(p['total']))}</small></td>
@@ -305,7 +305,7 @@ def resumen_telegram(pedidos, maximo=25):
               "(del más antiguo al más nuevo)\n"]
     for i, p in enumerate(pedidos[:maximo], 1):
         d = _dias(p["creado"])
-        lineas.append(f"{i}. {p['nombre']} — 0{p['telefono']} — {p['ciudad']} — "
+        lineas.append(f"{i}. {p['nombre']} — {p['telefono']} — {p['ciudad']} — "
                       f"guía {p['guia']} — {p['producto']}"
                       + (f" — {d} d" if d is not None else ""))
     if len(pedidos) > maximo:

@@ -801,3 +801,41 @@ def enviar_texto(user_ns, texto):
         msg = (d.get("message") or d.get("error") or r.text[:200]) if isinstance(d, dict) else r.text[:200]
         return False, f"Chatea Pro respondió {r.status_code}: {msg}"
     return True, "enviado"
+
+
+# Namespace de las plantillas de WhatsApp de la cuenta (igual para todas).
+WA_NAMESPACE = os.environ.get("WA_TEMPLATE_NAMESPACE", "77ec6416_e46b_48ae_bb83_53895a3fc3b6")
+
+
+def enviar_plantilla(telefono, plantilla, valores, lang="es"):
+    """
+    Envia una plantilla APROBADA de WhatsApp (sirve fuera de la ventana de 24h)
+    via POST /subscriber/send-whatsapp-template-by-user-id.
+      telefono: celular del cliente (se normaliza a 593XXXXXXXXX)
+      valores:  lista con el texto de {{1}}, {{2}}, ... en orden
+    Devuelve (ok, detalle).
+    """
+    dig = re.sub(r"\D", "", str(telefono or ""))
+    dig = dig[3:] if dig.startswith("593") else dig
+    dig = dig.lstrip("0")[-9:]
+    if len(dig) != 9:
+        return False, f"Teléfono inválido: {telefono}"
+    contenido = {
+        "namespace": WA_NAMESPACE, "name": plantilla, "lang": lang,
+        "params": {f"BODY_{{{{{i}}}}}": str(v) for i, v in enumerate(valores, 1)},
+    }
+    try:
+        r = requests.post(BASE_URL + "/subscriber/send-whatsapp-template-by-user-id",
+                          headers=_headers(), timeout=30,
+                          json={"user_id": f"593{dig}", "create_if_not_found": "no",
+                                "content": contenido})
+    except requests.RequestException as e:
+        return False, f"No se pudo contactar Chatea Pro: {e}"
+    try:
+        d = r.json()
+    except ValueError:
+        d = {}
+    if r.status_code >= 400 or (isinstance(d, dict) and d.get("status") not in (None, "ok")):
+        msg = (d.get("message") or d.get("error") or r.text[:200]) if isinstance(d, dict) else r.text[:200]
+        return False, f"Chatea Pro respondió {r.status_code}: {msg}"
+    return True, "plantilla enviada"

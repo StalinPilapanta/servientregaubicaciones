@@ -7,7 +7,7 @@ Comandos:
   /ventas   -> lista de pedidos del dia (nombre, ciudad, valor)
   /pendientes -> pedidos del dia cuyo Resumen menciona 'pendiente'
   /retiro   -> pedidos disponibles para retiro en oficina Servientrega
-  /seguimiento [ayer|fecha] -> CSV de pedidos para retiro (dias sin retirar y guia)
+  /seguimiento [ayer|fecha] -> HTML de pedidos para retiro (dias sin retirar y guia)
   /reporte_diario -> reporte completo del dia (resumen + ventas + retiros)
   /pedido <telefono>  -> "Resumen del pedido - Datos de envio" de un cliente
   /campos <telefono>  -> muestra todos los campos guardados del cliente
@@ -34,6 +34,7 @@ Variables de entorno:
   OPENAI_MODEL           modelo (def. gpt-4o-mini)
   ANTHROPIC_API_KEY      asistente conversacional (texto libre y audios), ver asistente.py
   GROQ_API_KEY           transcripcion de notas de voz (o OPENAI_API_KEY), ver transcribir.py
+  HORA_ALERTAS           novedades + recordatorio de retiro diarios (def. 09:00), ver alertas.py
   AGENCIAS_API_URL       servicio de agencias (def. https://servientrega.neolabsgroup.io)
   AGENCIAS_TOKEN         token opcional del servicio de agencias
   GEOCODER               "nominatim" (def.) u "off": agencia mas cercana a la referencia
@@ -44,7 +45,6 @@ Variables de entorno:
 
 import os
 import re
-import csv
 import json
 import time
 import html
@@ -62,6 +62,9 @@ import ficha
 import dropi_mcp
 import dropi_pedido
 import reporte_agencia
+import reporte_html
+import alertas
+import meta
 import asistente
 import transcribir
 
@@ -109,15 +112,10 @@ def enviar_documento(chat_id, ruta, caption):
         }, files={"document": f}, timeout=60)
 
 
-def _enviar_csv(chat_id, filas, caption):
-    """Arma un CSV temporal a partir de filas (dicts) y lo envia por Telegram."""
-    fd, ruta = tempfile.mkstemp(suffix=".csv")
-    os.close(fd)
+def _enviar_html(chat_id, contenido, prefijo, caption):
+    """Guarda el HTML en un temporal, lo envia por Telegram y lo borra."""
+    ruta = reporte_html.guardar(contenido, prefijo)
     try:
-        with open(ruta, "w", newline="", encoding="utf-8-sig") as f:
-            w = csv.DictWriter(f, fieldnames=list(filas[0].keys()))
-            w.writeheader()
-            w.writerows(filas)
         enviar_documento(chat_id, ruta, caption)
     finally:
         try:
@@ -294,6 +292,32 @@ def manejar_callback(cb):
         if accion in ("wa", "wx"):
             _callback_borrador(cb_id, chat_id, message_id, accion, ns)
             return
+        if accion == "mc":
+            try:
+                meta.elegir_cuenta(ns)
+                responder_callback(cb_id, "Cuenta elegida")
+                editar_plano(chat_id, message_id, f"✅ Cuenta publicitaria activa: {ns}")
+            except meta.MetaError as e:
+                responder_callback(cb_id, str(e), True)
+            return
+        if accion == "nv":
+            responder_callback(cb_id, "Enviando plantilla...")
+            ok, det = alertas.enviar_novedad(ns)
+            enviar_plano(chat_id, ("✅ Plantilla de novedad enviada" if ok
+                                   else f"❌ No se envió ({det})") + f" · pedido #{ns}")
+            return
+        if accion == "rr":
+            with _retiros_lock:
+                lista = list(_retiros_pendientes)
+                _retiros_pendientes.clear()
+            if not lista:
+                responder_callback(cb_id, "No hay recordatorios pendientes.", True)
+                return
+            responder_callback(cb_id, f"Enviando {len(lista)}...")
+            editar_plano(chat_id, message_id, f"⏳ Enviando {len(lista)} recordatorios...")
+            env, fal = alertas.enviar_recordatorios(lista)
+            enviar_plano(chat_id, _texto_recordatorios(env, fal, []))
+            return
         if accion == "re":
             a = _ficha_de(ns, forzar=True)
             responder_callback(cb_id, "Ficha actualizada")
@@ -412,7 +436,8 @@ _COMANDOS = (
     "/start", "/ayuda", "/help", "/nuevo", "/en_agencia", "/dropi_conectar",
     "/dropi_desconectar", "/resumen", "/ventas", "/pedido", "/ficha", "/crear",
     "/pendientes", "/retiro", "/campos", "/seguimiento", "/reporte_diario", "/guia",
-    "/dropi_pedidos", "/dropi_saldo",
+    "/dropi_pedidos", "/dropi_saldo", "/novedades", "/recordatorios", "/probar_plantilla",
+    "/meta", "/meta_conectar", "/meta_desconectar",
 )
 # "/dropipedidos" -> "/dropi_pedidos" (copias del menu viejo sin guion bajo).
 _SIN_GUION = {c.replace("_", ""): c for c in _COMANDOS}
@@ -426,6 +451,51 @@ def _normalizar_cmd(cmd):
 def manejar_comando(chat_id, texto):
     texto = (texto or "").strip()
     cmd = _normalizar_cmd(texto.split()[0].lower()) if texto else ""
+
+    if cmd == "/meta_conectar":
+        _pedir_conexion_meta(chat_id, "🔵 Conectar Meta Ads (Facebook).")
+        return
+
+    if cmd == "/meta_desconectar":
+        meta.desconectar()
+        enviar_plano(chat_id, "Meta desconectado. Usa /meta_conectar para volver a conectar.")
+        return
+
+    if cmd == "/meta":
+        try:
+            desde, hasta, etiqueta = _periodo_meta(texto.split(maxsplit=1)[1:] or [""])
+        except ValueError:
+            enviar_plano(chat_id, "Uso: /meta [hoy | ayer | 7d | mes | mes_pasado | "
+                                  "dd/mm/aaaa | dd/mm/aaaa-dd/mm/aaaa]")
+            return
+        enviar_plano(chat_id, f"⏳ Consultando Meta Ads ({etiqueta})...")
+        threading.Thread(target=_meta_resumen, args=(chat_id, desde, hasta, etiqueta),
+                         daemon=True).start()
+        return
+
+    if cmd == "/novedades":
+        enviar_plano(chat_id, "⏳ Revisando novedades y devoluciones en Dropi...")
+        threading.Thread(target=_alerta_novedades, args=([chat_id], False),
+                         daemon=True).start()
+        return
+
+    if cmd == "/recordatorios":
+        enviar_plano(chat_id, "⏳ Revisando pedidos en agencia para recordar...")
+        threading.Thread(target=_alerta_retiros, args=([chat_id], False),
+                         daemon=True).start()
+        return
+
+    if cmd == "/probar_plantilla":
+        partes = texto.split()
+        if len(partes) < 2:
+            enviar_plano(chat_id, "Uso: /probar_plantilla <tu celular>\n"
+                                  "Envía la plantilla de recordatorio de retiro con datos de "
+                                  "ejemplo a ESE número, para comprobar que llega bien.")
+            return
+        ok, det = alertas.probar_plantilla(partes[1])
+        enviar_plano(chat_id, ("✅ " if ok else "❌ ") + f"{det} → {partes[1]} "
+                              f"({alertas.PLANTILLA_RETIRO})")
+        return
 
     if cmd == "/nuevo":
         asistente.olvidar(chat_id)
@@ -451,7 +521,10 @@ def manejar_comando(chat_id, texto):
                "• /dropi_conectar — iniciar sesión en Dropi (MCP)\n"
                "• /reporte_diario — reporte completo del día (resumen + ventas + retiros)\n"
                "• /guia <número> — estado de una guía en Dropi\n"
-               "• /dropi_pedidos [estado] [n] — pedidos de Dropi (últimos 30 días) + CSV")
+               "• /dropi_pedidos [estado] [n] — pedidos de Dropi (últimos 30 días) + HTML\n"
+               "• /novedades — pedidos con novedad o devolución (y plantilla al cliente)\n"
+               "• /meta [hoy|ayer|7d|mes] — gasto y conversaciones por campaña en Meta Ads\n"
+               "• /meta_conectar — conectar con Facebook (Meta Ads)")
         return
 
     if cmd == "/en_agencia":
@@ -655,15 +728,11 @@ def manejar_comando(chat_id, texto):
                        "SERVIENTREGA.")
                 return
 
-            _enviar_csv(chat_id, filas,
-                        "📦 *Seguimiento retiro Servientrega*\n"
-                        f"Fecha de consulta: {f_s} ({scope})\n"
-                        f"Pedidos para retiro: {len(filas)}\n"
-                        "Columnas: guía, nombre, teléfono, ciudad, provincia, "
-                        "dirección, productos, valor, bodega, tasa, estado, "
-                        "fecha en retiro, días sin retirar, datos_dropi "
-                        "(JSON completo de Dropi)\n"
-                        "Archivo: seguimiento_retiro.csv")
+            _enviar_html(chat_id,
+                         reporte_html.html_retiros(filas, f"Consulta: {f_s} ({scope})"),
+                         "seguimiento_retiro",
+                         f"📦 Seguimiento retiro Servientrega · {f_s}\n"
+                         f"Pedidos para retiro: {len(filas)}")
 
             con_fecha = [x for x in filas if x["dias_sin_retirar"] != ""]
             prom_dias = 0
@@ -692,18 +761,11 @@ def manejar_comando(chat_id, texto):
             texto, filas = generar_reporte_diario()
             enviar(chat_id, texto)
             if filas:
-                _enviar_csv(
-                    chat_id, filas,
-                    f"📦 *Seguimiento retiro Servientrega*\n"
-                    f"Fecha: {chateapro.hoy_ecuador().strftime('%d/%m/%Y')} "
-                    f"(últimas 24h)\n"
-                    f"Pedidos para retiro: {len(filas)}\n"
-                    "Columnas: guía, nombre, teléfono, ciudad, provincia, "
-                    "dirección, productos, valor, bodega, tasa, estado, "
-                    "fecha en retiro, días sin retirar, datos_dropi "
-                    "(JSON completo de Dropi)\n"
-                    "Archivo: seguimiento_retiro.csv",
-                )
+                _enviar_html(chat_id, reporte_html.html_retiros(filas, "Últimas 24h"),
+                             "seguimiento_retiro",
+                             f"📦 Seguimiento retiro Servientrega · "
+                             f"{chateapro.hoy_ecuador().strftime('%d/%m/%Y')}\n"
+                             f"Pedidos para retiro: {len(filas)}")
         except Exception as e:
             enviar(chat_id, f"❌ Error al generar el reporte diario: {e}")
         return
@@ -797,7 +859,7 @@ def _guia_mcp(chat_id, numero):
 
 
 def _dropi_pedidos_mcp(chat_id, estado, n):
-    """/dropi_pedidos [ESTADO] [n]: pedidos de los ultimos 30 dias (MCP) + CSV."""
+    """/dropi_pedidos [ESTADO] [n]: pedidos de los ultimos 30 dias (MCP) + HTML."""
     try:
         items = dropi_pedido.listar_pedidos(estado, n)
     except dropi_mcp.AuthRequired:
@@ -823,7 +885,8 @@ def _dropi_pedidos_mcp(chat_id, estado, n):
               "ciudad": o.get("city"), "estado": o.get("status"), "valor": o.get("total"),
               "transportadora": o.get("shipping_company"),
               "guia": o.get("tracking_code") or ""} for o in items]
-    _enviar_csv(chat_id, filas, f"📦 Pedidos Dropi{filtro}")
+    _enviar_html(chat_id, reporte_html.html_pedidos(filas, f"Últimos 30 días{filtro}"),
+                 "pedidos_dropi", f"📦 Pedidos Dropi{filtro}: {len(filas)}")
 
 
 def _reporte_en_agencia(chat_id):
@@ -879,6 +942,9 @@ class _OAuthCallback(BaseHTTPRequestHandler):
 
     def do_GET(self):
         ruta = urlparse(self.path).path
+        if meta.es_ruta_callback(self.path):
+            self._meta()
+            return
         if ruta != urlparse(dropi_mcp.REDIRECT_URI).path:
             self.send_response(404)
             self.end_headers()
@@ -896,6 +962,22 @@ class _OAuthCallback(BaseHTTPRequestHandler):
             f"<body style='font:18px system-ui;padding:24px'>{msg}</body>".encode())
         if ok:
             _dropi_conectado_ok(ALLOWED)
+
+    def _meta(self):
+        try:
+            est = meta.completar_desde_url("http://x" + self.path)
+            ok, msg = True, "✅ Facebook conectado. Ya puedes volver a Telegram."
+        except Exception as e:
+            ok, est, msg = False, None, f"❌ No se pudo conectar: {html.escape(str(e))}"
+        self.send_response(200 if ok else 400)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(
+            f"<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'>"
+            f"<body style='font:18px system-ui;padding:24px'>{msg}</body>".encode())
+        if ok:
+            for c in ALLOWED:
+                _meta_conectado_ok(c, est)
 
     def log_message(self, *args):
         pass
@@ -917,14 +999,107 @@ def _iniciar_servidor_oauth():
     print(f"Callback OAuth de Dropi escuchando en :{puerto}")
 
 
+# --- Meta Ads (Conectar con Facebook) ---
+
+def _pedir_conexion_meta(chat_id, motivo):
+    try:
+        url = meta.url_login()
+    except meta.MetaError as e:
+        enviar_plano(chat_id, f"❌ {e}\nRevisa la configuración de la app de Meta (README).")
+        return
+    texto = (f"{motivo}\n\n1) Toca «Conectar con Facebook» y entra con tu cuenta.\n"
+             "2) Acepta el permiso para ver el rendimiento de tus anuncios.\n")
+    if urlparse(meta.REDIRECT_URI).hostname in ("localhost", "127.0.0.1"):
+        texto += ("3) Si al final el navegador muestra «no se puede acceder al sitio», "
+                  "copia la URL COMPLETA de la barra de direcciones y pégala aquí.\n")
+    texto += "\nEl link vence en 15 minutos. El acceso dura unos 60 días."
+    enviar_plano(chat_id, texto, [[{"text": "🔵 Conectar con Facebook", "url": url}]])
+
+
+def _meta_conectado_ok(chat_id, est):
+    cuentas = est.get("cuentas") or []
+    L = [f"✅ Facebook conectado: {est.get('usuario') or '-'}"
+         + (f" · vence en {est['dias_restantes']} días" if est.get("dias_restantes") else "")]
+    if not cuentas:
+        L.append("⚠️ Tu usuario no tiene cuentas publicitarias visibles.")
+        enviar_plano(chat_id, "\n".join(L))
+        return
+    L.append(f"📣 Cuenta activa: {est.get('cuenta')}")
+    botones = None
+    if len(cuentas) > 1:
+        L.append("Tienes varias cuentas; elige otra si no es esa:")
+        botones = [[{"text": f"{c['nombre']} ({c['id']})", "callback_data": f"mc:{c['id']}"}]
+                   for c in cuentas[:8]]
+    L.append("Prueba: /meta mes")
+    enviar_plano(chat_id, "\n".join(L), botones)
+
+
+def _procesar_url_meta(chat_id, texto):
+    try:
+        est = meta.completar_desde_url(texto)
+    except Exception as e:
+        enviar_plano(chat_id, f"❌ No se pudo conectar Facebook: {e}\n"
+                              "Usa /meta_conectar para intentar de nuevo.")
+        return
+    _meta_conectado_ok(chat_id, est)
+
+
+def _periodo_meta(args):
+    """Devuelve (desde, hasta, etiqueta). Lanza ValueError si no se entiende."""
+    a = (args[0] if args else "").strip().lower()
+    hoy = chateapro.hoy_ecuador()
+    if a in ("", "hoy"):
+        return hoy, hoy, f"hoy {hoy:%d/%m/%Y}"
+    if a == "ayer":
+        d = hoy - dt.timedelta(days=1)
+        return d, d, f"ayer {d:%d/%m/%Y}"
+    if a in ("7d", "semana"):
+        return hoy - dt.timedelta(days=6), hoy, "últimos 7 días"
+    if a == "mes":
+        return hoy.replace(day=1), hoy, f"{hoy:%m/%Y} (hasta hoy)"
+    if a in ("mes_pasado", "mespasado"):
+        fin = hoy.replace(day=1) - dt.timedelta(days=1)
+        return fin.replace(day=1), fin, f"{fin:%m/%Y}"
+    partes = [x.strip() for x in a.split("-")]
+    fechas = [dt.datetime.strptime(x, "%d/%m/%Y").date() for x in partes if x]
+    if len(fechas) == 1:
+        return fechas[0], fechas[0], f"{fechas[0]:%d/%m/%Y}"
+    if len(fechas) == 2:
+        return fechas[0], fechas[1], f"{fechas[0]:%d/%m/%Y} al {fechas[1]:%d/%m/%Y}"
+    raise ValueError(a)
+
+
+def _meta_resumen(chat_id, desde, hasta, etiqueta):
+    try:
+        enviar_plano(chat_id, meta.resumen(desde, hasta, etiqueta)[:4000])
+    except meta.AuthRequired as e:
+        _pedir_conexion_meta(chat_id, f"🔵 {e} Conecta de nuevo con Facebook.")
+    except Exception as e:
+        enviar_plano(chat_id, f"❌ Error consultando Meta Ads: {e}")
+
+
+def _aviso_vencimiento_meta():
+    est = meta.estado()
+    if not est.get("conectado") and not meta.configurada():
+        return
+    dias = est.get("dias_restantes")
+    if est.get("usuario") and dias is not None and dias <= 7:
+        for c in ALLOWED:
+            _pedir_conexion_meta(c, f"⏰ El acceso a Facebook vence en {max(dias, 0)} días. "
+                                    "Vuelve a conectar para que /meta siga funcionando.")
+
+
 MENU_COMANDOS = [
     ("en_agencia", "Pedidos en agencia Servientrega (HTML + WhatsApp)"),
     ("resumen", "Ventas de hoy"),
     ("ventas", "Lista de pedidos de hoy"),
     ("reporte_diario", "Reporte completo del día"),
     ("guia", "Estado de una guía: /guia <número>"),
-    ("dropi_pedidos", "Pedidos de Dropi (MCP) + CSV"),
+    ("dropi_pedidos", "Pedidos de Dropi (MCP) + HTML"),
     ("dropi_conectar", "Iniciar sesión en Dropi (MCP)"),
+    ("novedades", "Novedades y devoluciones de Dropi"),
+    ("meta", "Meta Ads: gasto y conversaciones"),
+    ("meta_conectar", "Conectar con Facebook (Meta Ads)"),
     ("nuevo", "Nueva conversación con el asistente"),
     ("ayuda", "Ver todos los comandos"),
 ]
@@ -951,13 +1126,16 @@ NOTIFICAR = os.environ.get("NOTIFICAR_VENTAS", "true").lower() == "true"
 REPORTE_DIARIO = os.environ.get("REPORTE_DIARIO", "true").lower() == "true"
 HORA_REPORTE = os.environ.get("HORA_REPORTE_DIARIO", "22:00")
 _ultimo_reporte_dia = None
+ALERTAS_DIARIAS = os.environ.get("ALERTAS_DIARIAS", "true").lower() == "true"
+HORA_ALERTAS = os.environ.get("HORA_ALERTAS", "09:00")
+_ultima_alerta_dia = None
 
 
 def generar_reporte_diario():
     """
     Arma el reporte diario completo (resumen + ventas + seguimiento de retiro).
     Devuelve (texto, filas_seguimiento): el texto listo para /sendMessage y las
-    filas del seguimiento (para adjuntar como CSV si hay datos).
+    filas del seguimiento (para adjuntar como HTML si hay datos).
     """
     hoy = chateapro.hoy_ecuador()
     f_s = hoy.strftime("%d/%m/%Y")
@@ -1023,16 +1201,11 @@ def _enviar_reporte_diario():
         try:
             enviar(chat_id, texto)
             if filas:
-                _enviar_csv(chat_id, filas,
-                            f"📦 *Seguimiento retiro Servientrega*\n"
-                            f"Fecha: {chateapro.hoy_ecuador().strftime('%d/%m/%Y')} "
-                            f"(últimas 24h)\n"
-                            f"Pedidos para retiro: {len(filas)}\n"
-                            "Columnas: guía, nombre, teléfono, ciudad, provincia, "
-                            "dirección, productos, valor, bodega, tasa, estado, "
-                            "fecha en retiro, días sin retirar, datos_dropi "
-                            "(JSON completo de Dropi)\n"
-                            "Archivo: seguimiento_retiro.csv")
+                _enviar_html(chat_id, reporte_html.html_retiros(filas, "Últimas 24h"),
+                             "seguimiento_retiro",
+                             f"📦 Seguimiento retiro Servientrega · "
+                             f"{chateapro.hoy_ecuador().strftime('%d/%m/%Y')}\n"
+                             f"Pedidos para retiro: {len(filas)}")
         except Exception as e:
             print(f"Error enviando reporte diario a {chat_id}: {e}")
 
@@ -1159,6 +1332,8 @@ def _accion_asistente(chat_id, acc):
                      f"{acc['texto']}",
                      [[{"text": "📲 Enviar por WhatsApp", "callback_data": f"wa:{bid}"},
                        {"text": "✖️ Descartar", "callback_data": f"wx:{bid}"}]])
+    elif acc["tipo"] == "conectar_meta":
+        _pedir_conexion_meta(chat_id, "🔵 Para responderte necesito acceso a Meta Ads.")
     elif acc["tipo"] == "conectar_dropi":
         _pedir_conexion_dropi(chat_id, "🔐 Dropi pide iniciar sesión para responderte.")
 
@@ -1202,6 +1377,103 @@ def _callback_borrador(cb_id, chat_id, message_id, accion, bid):
                      f"❌ No se envió ({det}). Envíalo a mano desde Chatea Pro:\n\n{b['texto']}")
 
 
+# --- Alertas de Dropi: novedades/devoluciones y recordatorio de retiro ---
+
+_retiros_pendientes = []
+_retiros_lock = threading.Lock()
+
+
+def _alerta_novedades(chats, solo_nuevas=True):
+    try:
+        r = alertas.revisar_novedades(solo_nuevas)
+    except dropi_mcp.AuthRequired:
+        for c in chats:
+            _pedir_conexion_dropi(c, "🔐 Dropi pide iniciar sesión para revisar novedades.")
+        return
+    except Exception as e:
+        for c in chats:
+            enviar_plano(c, f"❌ Error revisando novedades: {e}")
+        return
+    nov, dev = r["novedades"], r["devoluciones"]
+    que = " nuevas" if solo_nuevas else ""
+    if not nov and not dev:
+        if not solo_nuevas:
+            for c in chats:
+                enviar_plano(c, "✅ Sin novedades ni devoluciones en los últimos 30 días.")
+        return
+    L = [f"🚨 Novedades{que}: {len(nov)} · Devoluciones{que}: {len(dev)}", ""]
+    for f in dev[:15]:
+        L.append(f"↩️ #{f['pedido']} {f['nombre']} — {f['ciudad']} — ${f['valor']} — "
+                 f"{f['estado']} ({f['transportadora']})")
+    for c in chats:
+        enviar_plano(c, "\n".join(L)[:4000])
+        for f in nov[:10]:
+            enviar_plano(c, f"⚠️ NOVEDAD #{f['pedido']} · {f['nombre']} · "
+                            f"{reporte_agencia.limpiar_telefono(f['telefono'])}\n"
+                            f"📍 {f['ciudad']} · {f['transportadora']} · guía {f['guia'] or '-'} · "
+                            f"${f['valor']}",
+                         [[{"text": "📲 Enviar plantilla de novedad",
+                            "callback_data": f"nv:{f['pedido']}"}]])
+        filas = nov + dev
+        _enviar_html(c, reporte_html.html_pedidos(filas, "Últimos 30 días",
+                                                  "🚨 Novedades y devoluciones"),
+                     "novedades", f"🚨 Novedades y devoluciones: {len(filas)}")
+
+
+def _texto_recordatorios(enviados, fallidos, pendientes, en_agencia=None):
+    L = []
+    if en_agencia is not None:
+        L.append(f"🏢 Pedidos en agencia: {en_agencia} · recordatorio a los "
+                 f"{alertas.RECORDATORIO_DIAS} días")
+    if enviados:
+        L.append(f"✅ Recordatorio enviado a {len(enviados)}:")
+        L += [f"   • {p['nombre']} — {p['ciudad']} — guía {p['guia']}" for p in enviados[:25]]
+    for p, err in fallidos:
+        L.append(f"❌ {p['nombre']} ({p['telefono']}): {err}")
+    if pendientes:
+        L.append(f"⏳ Listos para recordar: {len(pendientes)}")
+        L += [f"   • {p['nombre']} — {p['ciudad']} — {p['dias']} días" for p in pendientes[:25]]
+    if not (enviados or fallidos or pendientes):
+        L.append("Nadie para recordar hoy.")
+    return "\n".join(L)
+
+
+def _alerta_retiros(chats, automatico=True):
+    if alertas.RECORDATORIO_MODO == "off":
+        if not automatico:
+            for c in chats:
+                enviar_plano(c, "Recordatorios desactivados (RECORDATORIO_MODO=off).")
+        return
+    try:
+        # Manual (/recordatorios) siempre pide confirmacion; el diario sigue el modo.
+        r = alertas.revisar_retiros(enviar=None if automatico else False)
+    except dropi_mcp.AuthRequired:
+        for c in chats:
+            _pedir_conexion_dropi(c, "🔐 Dropi pide iniciar sesión para los recordatorios.")
+        return
+    except Exception as e:
+        for c in chats:
+            enviar_plano(c, f"❌ Error en recordatorios de retiro: {e}")
+        return
+    with _retiros_lock:
+        _retiros_pendientes[:] = r["pendientes"]
+    texto = _texto_recordatorios(r["enviados"], r["fallidos"], r["pendientes"], r["en_agencia"])
+    botones = ([[{"text": f"📲 Enviar {len(r['pendientes'])} recordatorios",
+                  "callback_data": "rr:todos"}]] if r["pendientes"] else None)
+    for c in chats:
+        enviar_plano(c, texto[:4000], botones)
+
+
+def _alertas_diarias():
+    chats = list(ALLOWED)
+    _alerta_novedades(chats, solo_nuevas=True)
+    _alerta_retiros(chats, automatico=True)
+    try:
+        _aviso_vencimiento_meta()
+    except Exception as e:
+        print("Error revisando el acceso a Meta:", e)
+
+
 def main():
     if not TG_TOKEN:
         raise SystemExit("Falta TELEGRAM_BOT_TOKEN")
@@ -1213,7 +1485,7 @@ def main():
     if REPORTE_DIARIO:
         print(f"Reporte diario ACTIVO (envio a las {HORA_REPORTE} hora de Ecuador).")
 
-    global _ultimo_check, _ultimo_reporte_dia
+    global _ultimo_check, _ultimo_reporte_dia, _ultima_alerta_dia
     offset = None
     while True:
         # 1) Revisar mensajes entrantes (comandos) con timeout corto.
@@ -1240,6 +1512,10 @@ def main():
             if not autorizado(chat_id):
                 enviar(chat_id, "🚫 No autorizado.")
                 continue
+            if meta.es_url_callback(texto):
+                threading.Thread(target=_procesar_url_meta, args=(chat_id, texto),
+                                 daemon=True).start()
+                continue
             if dropi_mcp.es_url_callback(texto):
                 _procesar_url_dropi(chat_id, texto)
                 continue
@@ -1258,7 +1534,15 @@ def main():
             _ultimo_check = time.time()
             revisar_ventas_nuevas()
 
-        # 3) Reporte diario automatico al final del dia (hora de Ecuador).
+        # 3) Alertas de Dropi (novedades + recordatorio de retiro), una vez al dia.
+        if ALERTAS_DIARIAS and ALLOWED:
+            ahora = dt.datetime.now(chateapro.TZ_ECUADOR)
+            hoy_s = ahora.strftime("%Y-%m-%d")
+            if ahora.strftime("%H:%M") >= HORA_ALERTAS and _ultima_alerta_dia != hoy_s:
+                _ultima_alerta_dia = hoy_s
+                threading.Thread(target=_alertas_diarias, daemon=True).start()
+
+        # 4) Reporte diario automatico al final del dia (hora de Ecuador).
         if REPORTE_DIARIO and ALLOWED:
             ahora = dt.datetime.now(chateapro.TZ_ECUADOR)
             hoy_s = ahora.strftime("%Y-%m-%d")

@@ -27,6 +27,7 @@ import dropi_mcp
 import dropi_pedido
 import agencias
 import promos
+import meta
 
 MODELO = os.environ.get("ASISTENTE_MODELO", "claude-haiku-5-5")
 ESFUERZO = os.environ.get("ASISTENTE_ESFUERZO", "low")
@@ -43,6 +44,7 @@ Fuentes:
   teléfono, ciudad, provincia, dirección, productos escogidos, valor) y su chat.
 - Dropi: donde se crean los pedidos y se ve su estado, guía, stock y envío.
 - Agencias Servientrega del directorio local.
+- Meta Ads: gasto y conversaciones de las campañas (anuncios a WhatsApp).
 
 Reglas:
 - Usa las herramientas para cualquier dato; nunca inventes pedidos, montos ni estados.
@@ -108,6 +110,12 @@ TOOLS = [
           "dentro de una ciudad.",
           {"ciudad": {"type": "string"}, "referencia": {"type": "string"},
            "provincia": {"type": "string"}}, ["ciudad", "referencia"]),
+    _tool("meta_campanas",
+          "Meta Ads (Facebook/Instagram): gasto, impresiones, clics, conversaciones de "
+          "WhatsApp iniciadas y costo por conversación, por campaña, entre dos fechas.",
+          {"desde": {"type": "string", "description": "dd/mm/aaaa"},
+           "hasta": {"type": "string", "description": "dd/mm/aaaa (def. igual a desde)"}},
+          ["desde"]),
     _tool("abrir_ficha",
           "Muestra al usuario la ficha de venta de un cliente con los botones para crear "
           "el pedido en Dropi (él confirma). Úsala cuando pida crear o revisar un pedido.",
@@ -255,7 +263,20 @@ def t_agencia_cercana(ciudad, referencia, provincia=""):
     return {"cercanas": agencias.cercanas_por_referencia(ciudad, [referencia], provincia)}
 
 
+def t_meta_campanas(desde, hasta=None):
+    d = _fecha(desde)
+    h = _fecha(hasta) if hasta else d
+    filas = meta.campanas(d, h)
+    gasto = round(sum(f["gasto"] for f in filas), 2)
+    conv = sum(f["conversaciones"] for f in filas)
+    return {"desde": desde, "hasta": hasta or desde, "gasto_total": gasto,
+            "conversaciones_total": conv,
+            "costo_por_conversacion": round(gasto / conv, 2) if conv else None,
+            "campanas": filas}
+
+
 EJECUTORES = {
+    "meta_campanas": t_meta_campanas,
     "ventas_del_dia": t_ventas_del_dia,
     "buscar_cliente": t_buscar_cliente,
     "ficha_cliente": t_ficha_cliente,
@@ -282,6 +303,9 @@ def _ejecutar(nombre, args, acciones):
         return f"Herramienta desconocida: {nombre}", True
     try:
         res = fn(**args)
+    except meta.AuthRequired:
+        acciones.append({"tipo": "conectar_meta"})
+        return "Meta no está conectado; se le mostró el botón Conectar con Facebook.", True
     except dropi_mcp.AuthRequired:
         acciones.append({"tipo": "conectar_dropi"})
         return "Dropi pide iniciar sesión; se le mostró el botón al usuario.", True

@@ -338,3 +338,49 @@ def revisar_stock(productos, busquedas):
         else:
             lineas.append(f"{nombre}: {n} ✓")
     return faltantes, lineas
+
+
+# ---------------------------------------------------------- riesgo cliente --
+
+RIESGO_DEVOLUCION_MIN = int(os.environ.get("RIESGO_DEVOLUCION_MIN", "30"))
+
+
+def perfil_cliente(telefono):
+    """
+    Huella del comprador en Dropi (get_customer_fingerprint_profile):
+      {tipo, riesgo, entrega, devolucion, sin_datos, alerta} o None si no hay huella.
+    Las etiquetas se muestran tal cual; la alerta se decide solo por los numeros.
+    entrega + devolucion no suman 100 (lo que falta son pedidos en curso).
+    """
+    tel = _tel9(telefono)
+    if len(tel) < 7:
+        return None
+
+    def cargar():
+        try:
+            res = dropi_mcp.llamar("get_customer_fingerprint_profile", {"phone": tel})
+        except dropi_mcp.AuthRequired:
+            raise
+        except Exception as e:
+            if "no se encontr" in str(e).lower():
+                return None
+            raise
+        if not isinstance(res, dict) or "risk_label" not in res:
+            return None  # "No se encontró huella digital para ese teléfono"
+        entrega = float(res.get("delivery_probability") or 0)
+        devol = float(res.get("return_probability") or 0)
+        sin_datos = entrega == 0 and devol == 0
+        return {"tipo": res.get("buyer_type") or "", "riesgo": res.get("risk_label") or "",
+                "entrega": entrega, "devolucion": devol, "sin_datos": sin_datos,
+                "alerta": (not sin_datos) and devol >= RIESGO_DEVOLUCION_MIN}
+    return _cacheado(f"perfil:{tel}", 3600, cargar)
+
+
+def texto_perfil(p):
+    if p is None:
+        return "🛡️ Dropi: sin huella para este teléfono (no se encontró)."
+    if p["sin_datos"]:
+        return f"🛡️ Dropi: {p['tipo']} · {p['riesgo']} · aún sin pedidos finalizados."
+    icono = "⚠️" if p["alerta"] else "🛡️"
+    return (f"{icono} Dropi: {p['tipo']} · {p['riesgo']} · entrega {p['entrega']:.0f}% · "
+            f"devolución {p['devolucion']:.0f}%")

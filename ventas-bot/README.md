@@ -25,16 +25,71 @@ le pides escribirle a un cliente muestra el borrador con «Enviar por WhatsApp»
 Las notas de voz se transcriben con Groq o OpenAI (`transcribir.py`), porque
 Claude no recibe audio, y el texto pasa al asistente.
 
+## Riesgo del cliente, novedades y recordatorios
+
+- **Riesgo del cliente:** cada ficha muestra el historial del comprador en Dropi
+  (`get_customer_fingerprint_profile`): tipo, etiqueta, % de entrega y % de
+  devolución. Si devolvió `RIESGO_DEVOLUCION_MIN`% o más (def. 30) sale
+  «⚠️ CLIENTE CON DEVOLUCIONES» arriba. No bloquea: solo avisa.
+- **Novedades y devoluciones (diario a `HORA_ALERTAS`, def. 09:00, y `/novedades`):**
+  pedidos en NOVEDAD / DEVOLUCION de los últimos 30 días. El aviso diario solo
+  trae los nuevos. Cada novedad llega con el botón «📲 Enviar plantilla de
+  novedad» (`novedad_recordatorio_v2_utilidad`) y se adjunta un HTML.
+- **Recordatorio de retiro (DESACTIVADO por defecto, `RECORDATORIO_MODO=off`):** al pedido que lleva
+  `RECORDATORIO_DIAS` días (def. 2) en «PARA RETIRO EN AGENCIA SERVIENTREGA» se le
+  envía la plantilla `seguimiento_recordatorio_en_oficina_v2_utilidad_new`
+  (nombre, producto, agencia, ciudad). Una sola vez por pedido. Los días se
+  cuentan desde que el bot ve el pedido en agencia, así que tras el primer
+  deploy los primeros recordatorios salen 2 días después.
+  `RECORDATORIO_MODO`: `off` (def.), `auto` (envía solo) o `confirmar` (botón).
+  `/recordatorios` siempre pide confirmación.
+- `/probar_plantilla <tu celular>` envía la plantilla de retiro con datos de
+  ejemplo a tu número, para comprobar el formato antes de que salga a clientes.
+
+## Meta Ads: «Conectar con Facebook»
+
+`/meta_conectar` manda un botón «🔵 Conectar con Facebook». Inicias sesión,
+aceptas el permiso `ads_read` (ver rendimiento de anuncios) y listo: el bot
+guarda un acceso de ~60 días y tus cuentas publicitarias. 7 días antes de que
+venza, la alerta diaria te vuelve a mandar el botón. Luego:
+
+- `/meta [hoy|ayer|7d|mes|mes_pasado|dd/mm/aaaa|dd/mm/aaaa-dd/mm/aaaa]` — gasto,
+  conversaciones de WhatsApp iniciadas y costo por conversación, por campaña.
+- El asistente también responde «¿cuánto llevo gastado en Drenaje esta semana?».
+
+**Configuración (una sola vez):** Facebook exige una app propia para el botón.
+
+1. developers.facebook.com → **Mis apps → Crear app** → caso de uso
+   «Otro» → tipo **Empresa**, vinculada a tu portafolio comercial.
+2. Agrega el producto **Inicio de sesión con Facebook** (o «para empresas») y
+   en *Configuración* pon en **URI de redireccionamiento de OAuth válidos** el
+   valor de `META_REDIRECT_URI`.
+3. Agrega el producto **API de Marketing**.
+4. En *Configuración → Básica* copia **Identificador de la app** →
+   `META_APP_ID` y **Clave secreta** → `META_APP_SECRET`.
+5. La app puede quedarse en modo **Desarrollo**: tú eres administrador y solo
+   lees tu propia cuenta publicitaria, así que no necesita revisión de Meta.
+6. Si la app es «Facebook Login for Business», crea una *Configuración* con el
+   permiso `ads_read` y pon su id en `META_LOGIN_CONFIG_ID`.
+
+Redirect: si el bot tiene dominio con HTTPS en Coolify, usa
+`https://tu-dominio/meta/oauth/callback` y expón el puerto 19876; el login
+termina solo. Sin dominio, deja el valor por defecto (`http://localhost:19876/...`):
+al final el navegador dirá «no se puede acceder al sitio»; copias esa URL y la
+pegas en el chat de Telegram (igual que con Dropi).
+
 ## Comandos (menú)
 
 - `/start` — menu de ayuda
 - `/nuevo` — nueva conversación con el asistente
+- `/novedades` — novedades y devoluciones de Dropi (30 días) + HTML
+- `/meta [periodo]` — Meta Ads por campaña · `/meta_conectar` / `/meta_desconectar`
 - `/resumen` — estadisticas del dia (ventas, facturacion, producto mas vendido)
 - `/ventas` — lista de pedidos de hoy
 - `/en_agencia` — reporte HTML de pedidos en agencia Servientrega (MCP) con botón de WhatsApp
 - `/reporte_diario` — reporte completo del día (también automático a las 22:00)
 - `/guia <número>` — pedido de Dropi con esa guía: estado, cliente, agencia, productos (MCP)
-- `/dropi_pedidos [ESTADO] [n]` — pedidos de Dropi de los últimos 30 días + CSV (MCP)
+- `/dropi_pedidos [ESTADO] [n]` — pedidos de Dropi de los últimos 30 días + HTML (MCP)
 - `/dropi_conectar` / `/dropi_desconectar` — login OAuth del MCP de Dropi
 
 Siguen funcionando aunque ya no están en el menú: `/ficha`, `/crear`, `/pedido`,
@@ -77,6 +132,20 @@ El bot guarda dos archivos locales:
 | `GROQ_API_KEY` | Transcripción de audios con Groq Whisper (se usa primero) |
 | `OPENAI_API_KEY` | Transcripción de audios con OpenAI si no hay Groq (y análisis IA de la ficha) |
 | `TRANSCRIPCION_MODELO` | Cambia el modelo de transcripción (opcional) |
+| `RIESGO_DEVOLUCION_MIN` | % de devolución desde el que la ficha alerta (def. 30) |
+| `ALERTAS_DIARIAS` | `true` (def.) / `false`: novedades + recordatorios diarios |
+| `HORA_ALERTAS` | Hora de las alertas diarias, Ecuador (def. `09:00`) |
+| `RECORDATORIO_DIAS` | Días en agencia antes de recordar (def. 2) |
+| `RECORDATORIO_MODO` | `off` (def., desactivado), `auto` o `confirmar` |
+| `PLANTILLA_RETIRO` / `PLANTILLA_NOVEDAD` | Nombres de las plantillas aprobadas |
+| `WA_TEMPLATE_NAMESPACE` | Namespace de plantillas de WhatsApp (ya viene el de la cuenta) |
+| `ALERTAS_ESTADO_PATH` | Estado de alertas/recordatorios (usar volumen) |
+| `META_APP_ID` / `META_APP_SECRET` | App de Meta para «Conectar con Facebook» |
+| `META_REDIRECT_URI` | Def. `http://localhost:19876/meta/oauth/callback` |
+| `META_LOGIN_CONFIG_ID` | Solo si usas «Facebook Login for Business» |
+| `META_AD_ACCOUNT_ID` | Opcional: `act_…` a usar si tienes varias cuentas |
+| `META_TOKEN_PATH` | Acceso guardado de Facebook (usar volumen) |
+| `META_GRAPH_VERSION` | Versión de la Graph API (def. `v24.0`) |
 
 ## Dropi directo (`dropi.py`)
 
