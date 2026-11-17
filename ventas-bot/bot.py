@@ -11,7 +11,8 @@ Comandos:
   /reporte_diario -> reporte completo del dia (resumen + ventas + retiros)
   /pedido <telefono>  -> "Resumen del pedido - Datos de envio" de un cliente
   /campos <telefono>  -> muestra todos los campos guardados del cliente
-  /ficha <telefono>   -> ficha de la venta (promo + agencia detectada) con botones
+  /crear_pedido <telefono> -> ficha de la venta (promo + agencia detectada) con
+                              botones para crear el pedido en Dropi
   /crear <telefono>   -> resumen + confirmar para crear el pedido en Dropi (MCP)
 
 Cada venta nueva llega a Telegram como ficha con botones:
@@ -434,7 +435,7 @@ def _parse_arg_fecha(texto):
 
 _COMANDOS = (
     "/start", "/ayuda", "/help", "/nuevo", "/en_agencia", "/dropi_conectar",
-    "/dropi_desconectar", "/resumen", "/ventas", "/pedido", "/ficha", "/crear",
+    "/dropi_desconectar", "/resumen", "/ventas", "/pedido", "/crear_pedido", "/crear",
     "/pendientes", "/retiro", "/campos", "/seguimiento", "/reporte_diario", "/guia",
     "/dropi_pedidos", "/dropi_saldo", "/novedades", "/recordatorios", "/probar_plantilla",
     "/meta", "/meta_conectar", "/meta_desconectar",
@@ -516,6 +517,7 @@ def manejar_comando(chat_id, texto):
                "• /resumen dd/mm/aaaa — ventas de una fecha\n"
                "• /ventas — lista de pedidos\n"
                "• /ventas dd/mm/aaaa — pedidos por fecha\n"
+               "• /crear_pedido <teléfono> — ficha de la venta (promo + agencia) con botón para crear en Dropi\n"
                "• /en_agencia — reporte HTML de pedidos en agencia Servientrega "
                "(Dropi MCP) con botón de WhatsApp\n"
                "• /dropi_conectar — iniciar sesión en Dropi (MCP)\n"
@@ -602,10 +604,10 @@ def manejar_comando(chat_id, texto):
             enviar(chat_id, f"❌ Error al buscar el pedido: {e}")
         return
 
-    if cmd in ("/ficha", "/crear"):
+    if cmd in ("/crear_pedido", "/crear"):
         partes = texto.split(maxsplit=1)
         if len(partes) < 2:
-            enviar(chat_id, f"Uso: {cmd} <teléfono>  (ej: {cmd} 995276111)")
+            enviar_plano(chat_id, f"Uso: {cmd} <teléfono>  (ej: {cmd} 995276111)")
             return
         telefono = partes[1].strip()
         enviar(chat_id, f"⏳ Analizando la venta de {telefono}...")
@@ -615,7 +617,7 @@ def manejar_comando(chat_id, texto):
                 enviar(chat_id, f"No encontré una venta con el teléfono {telefono}.")
                 return
             a = ficha.analizar(campos, forzar=True)
-            if cmd == "/ficha":
+            if cmd == "/crear_pedido":
                 enviar_ficha(chat_id, a)
                 return
             # /crear: si algo bloquea, muestra la ficha para que veas por que;
@@ -1093,6 +1095,7 @@ MENU_COMANDOS = [
     ("en_agencia", "Pedidos en agencia Servientrega (HTML + WhatsApp)"),
     ("resumen", "Ventas de hoy"),
     ("ventas", "Lista de pedidos de hoy"),
+    ("crear_pedido", "Ficha y crear pedido: /crear_pedido <teléfono>"),
     ("reporte_diario", "Reporte completo del día"),
     ("guia", "Estado de una guía: /guia <número>"),
     ("dropi_pedidos", "Pedidos de Dropi (MCP) + HTML"),
@@ -1210,18 +1213,46 @@ def _enviar_reporte_diario():
             print(f"Error enviando reporte diario a {chat_id}: {e}")
 
 
-# Recuerda que ventas ya se notificaron (por user_ns) para no repetir.
-_ya_notificadas = set()
-# Controla cada cuanto se re-consulta a un suscriptor que NO ha comprado.
-# Evita refetchear a todo el listado en cada ciclo (saturacion del API).
+# Ventas ya notificadas: {user_ns: "Fecha de compra"}. Se guarda en disco para
+# que un reinicio/despliegue no "trague" las ventas que llegaron mientras tanto.
+NOTIFICADAS_PATH = os.environ.get(
+    "VENTAS_NOTIFICADAS_PATH",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "ventas_notificadas.json"))
+_ya_notificadas = {}
+# Ultima revision de cada suscriptor: {user_ns: (ts, last_interaction)}.
 _ultima_revision = {}
 _ultimo_check = 0
 _primera_pasada = True
 
-# Cada cuantos segundos se vuelve a revisar a un suscriptor aun sin compra.
+# Cada cuantos segundos se vuelve a revisar a un suscriptor aun sin compra,
+# aunque no haya escrito nada nuevo (si escribio, se revisa en el siguiente ciclo).
 REVISAR_NUEVOS_INTERVALO = int(
     os.environ.get("REVISAR_NUEVOS_INTERVAL_SECONDS", "1800")
 )
+
+
+def _cargar_notificadas():
+    """Devuelve (dict, existia_el_archivo)."""
+    try:
+        with open(NOTIFICADAS_PATH, encoding="utf-8") as f:
+            return json.load(f), True
+    except (OSError, ValueError):
+        return {}, False
+
+
+def _guardar_notificadas():
+    # Solo se conservan las de los ultimos dias para que el archivo no crezca.
+    limite = chateapro.hoy_ecuador() - dt.timedelta(days=7)
+    for ns in [k for k, v in _ya_notificadas.items()
+               if (chateapro._parse_fecha_compra(v) or limite) < limite]:
+        _ya_notificadas.pop(ns, None)
+    try:
+        tmp = NOTIFICADAS_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(_ya_notificadas, f, ensure_ascii=False)
+        os.replace(tmp, NOTIFICADAS_PATH)
+    except OSError as e:
+        print("No se pudo guardar ventas_notificadas.json:", e)
 
 
 def revisar_ventas_nuevas():
@@ -1229,31 +1260,42 @@ def revisar_ventas_nuevas():
     Detecta ventas de hoy no notificadas y las envia a los chats permitidos.
 
     Para no saturar la API:
-      - solo hace 1 request para listar suscriptores recientes por ciclo,
-      - consulta los campos de un suscriptor que aun no compra como maximo cada
-        REVISAR_NUEVOS_INTERVALO segundos (30 min por defecto),
-      - los campos se leen de la cache de chateapro.py.
+      - 1 request por ciclo para listar los suscriptores de las ultimas 24h,
+      - solo se vuelven a leer los campos de un suscriptor si escribio algo
+        nuevo (cambio su last_interaction) o cada REVISAR_NUEVOS_INTERVALO.
+
+    Tras un reinicio se notifican las ventas de hoy que no estaban en
+    ventas_notificadas.json. Solo la primera vez que el bot corre (sin archivo)
+    se marcan en silencio para no mandar todo el historial del dia.
     """
-    global _primera_pasada
+    global _primera_pasada, _ya_notificadas
     try:
         suscriptores = chateapro.listar_suscriptores_recientes()
     except Exception as e:
         print("Error revisando ventas:", e)
         return
 
+    silencioso = False
+    if _primera_pasada:
+        _ya_notificadas, existia = _cargar_notificadas()
+        silencioso = not existia
+
     hoy = chateapro.hoy_ecuador()
     ahora = time.time()
+    cambios = False
 
     for s in suscriptores:
         ns = s.get("user_ns")
-        if not ns or ns in _ya_notificadas:
+        if not ns:
             continue
-        # Aun no ha comprado: no re-consultarlo tan seguido.
-        if not _primera_pasada and (ahora - _ultima_revision.get(ns, 0)) < REVISAR_NUEVOS_INTERVALO:
+        interaccion = s.get("last_interaction") or ""
+        ts, vista = _ultima_revision.get(ns, (0, None))
+        escribio = vista is not None and interaccion != vista
+        if not _primera_pasada and not escribio and (ahora - ts) < REVISAR_NUEVOS_INTERVALO:
             continue
-        _ultima_revision[ns] = ahora
+        _ultima_revision[ns] = (ahora, interaccion)
         try:
-            campos = chateapro.obtener_campos(ns)  # cacheado
+            campos = chateapro.obtener_campos(ns, fresco=escribio)
         except Exception as e:
             print(f"Error obteniendo campos de {ns}: {e}")
             continue
@@ -1262,12 +1304,18 @@ def revisar_ventas_nuevas():
         chateapro.registrar_retiros(campos)
         if not chateapro.es_venta_de_fecha(campos, hoy):
             continue
-        _ya_notificadas.add(ns)
-        # En la PRIMERA pasada solo marcamos (no notificar el historial).
-        if _primera_pasada:
+        fecha = campos.get(chateapro.CAMPO_FECHA, "")
+        if _ya_notificadas.get(ns) == fecha:
             continue
+        _ya_notificadas[ns] = fecha
+        cambios = True
+        if silencioso:
+            continue
+        print(f"Venta nueva: {ns} ({fecha})")
         _notificar_venta(campos)
 
+    if cambios or (_primera_pasada and silencioso):
+        _guardar_notificadas()
     _primera_pasada = False
 
 

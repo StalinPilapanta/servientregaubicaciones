@@ -117,11 +117,14 @@ def listar_todos_suscriptores(max_paginas=10):
     return todos
 
 
-def obtener_campos(user_ns):
-    """Devuelve un dict {nombre_campo: valor} de un suscriptor (con cache)."""
+def obtener_campos(user_ns, fresco=False):
+    """
+    Devuelve un dict {nombre_campo: valor} de un suscriptor (con cache).
+    fresco=True ignora la cache (el cliente acaba de escribir algo).
+    """
     ahora = time.time()
     cacheado = _CACHE.get(user_ns)
-    if cacheado and (ahora - cacheado["ts"]) < CACHE_TTL:
+    if not fresco and cacheado and (ahora - cacheado["ts"]) < CACHE_TTL:
         return cacheado["campos"]
 
     data = _get("/subscriber/get-info", {"user_ns": user_ns}).get("data", {})

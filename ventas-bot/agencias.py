@@ -103,13 +103,22 @@ def direccion_dropi(a):
 #
 # Cuando el buscador no reconoce el sector ("la salle", "colegio X", "parque Y")
 # y la ciudad tiene varias agencias, se geocodifica la referencia del cliente
-# con OpenStreetMap (Nominatim) y se elige la agencia del directorio local
+# con OpenStreetMap y se elige la agencia del directorio local
 # (directorio_limpio.json trae Latitud/Longitud) mas cercana a ese punto.
+#
+# Direcciones con cruce de calles ("Garcia Moreno y Martinez Mera 469"): se
+# ubica cada calle por separado y se toma el punto donde se cruzan.
+#
+# Geocodificadores (OpenStreetMap): Photon tolera faltas de ortografia
+# ("Martines" -> "Martinez") y nombres incompletos ("Garcia Moreno" ->
+# "Gabriel Garcia Moreno"); Nominatim queda de respaldo.
 #
 # Solo se envia la referencia de lugar + ciudad (nunca nombre ni telefono).
 #
 # Variables de entorno:
-#   GEOCODER            "nominatim" (def.) u "off" para desactivar
+#   GEOCODER            "auto" (def.: Photon y luego Nominatim), "photon",
+#                       "nominatim" u "off" para desactivar
+#   PHOTON_URL          def. https://photon.komoot.io/api/
 #   GEOCODER_URL        def. https://nominatim.openstreetmap.org/search
 #   GEOCODER_UA         User-Agent (Nominatim lo exige). Def. "ventas-bot/1.0"
 #   DIRECTORIO_PATH     def. directorio_limpio.json junto al codigo
@@ -121,7 +130,8 @@ import threading
 import time
 import unicodedata
 
-GEOCODER = os.environ.get("GEOCODER", "nominatim").strip().lower()
+GEOCODER = os.environ.get("GEOCODER", "auto").strip().lower()
+PHOTON_URL = os.environ.get("PHOTON_URL", "https://photon.komoot.io/api/")
 GEOCODER_URL = os.environ.get(
     "GEOCODER_URL", "https://nominatim.openstreetmap.org/search")
 GEOCODER_UA = os.environ.get("GEOCODER_UA", "ventas-bot/1.0")
@@ -135,6 +145,8 @@ DIRECTORIO_PATH = os.environ.get(
 _MAX_KM_CENTRO = 25
 # Un punto geocodificado debe caer a menos de esto del centro de la ciudad.
 _MAX_KM_PUNTO = 20
+# Dos calles "se cruzan" si algun tramo de cada una queda a menos de esto.
+_MAX_KM_CRUCE = 0.6
 
 _dir_cache = None
 _geo_cache = {}
@@ -201,36 +213,150 @@ def _agencias_ciudad(ciudad):
     centro = (lats[len(lats) // 2], lons[len(lons) // 2])  # mediana: robusta
     ok = [a for a in lista
           if _km(centro[0], centro[1], a["Latitud"], a["Longitud"]) <= _MAX_KM_CENTRO]
-    return ok, centro
+    # Solo agencias donde el cliente puede retirar (Entrega_en_oficina = SI).
+    retiro = [a for a in ok if _norm(a.get("Entrega_en_oficina")) != "no"]
+    return retiro or ok, centro
 
 
-def _geocodificar(consulta):
-    """(lat, lon, nombre_lugar) o None. Respeta 1 peticion/segundo."""
+def _pedir(url, params):
+    """GET al geocodificador respetando 1 peticion/segundo. JSON o None."""
     global _ultimo_geo
-    clave = _norm(consulta)
-    if clave in _geo_cache:
-        return _geo_cache[clave]
     with _geo_lock:
         espera = 1.1 - (time.time() - _ultimo_geo)
         if espera > 0:
             time.sleep(espera)
         try:
-            r = requests.get(GEOCODER_URL, params={
-                "q": consulta, "format": "json", "limit": 1, "countrycodes": "ec",
-            }, headers={"User-Agent": GEOCODER_UA}, timeout=10)
+            r = requests.get(url, params=params, headers={"User-Agent": GEOCODER_UA},
+                             timeout=10)
             r.raise_for_status()
-            d = r.json()
+            return r.json()
         except (requests.RequestException, ValueError) as e:
             print("Geocoder fallo:", e)
             return None
         finally:
             _ultimo_geo = time.time()
-    res = None
-    if d:
-        res = (float(d[0]["lat"]), float(d[0]["lon"]),
-               d[0].get("display_name", "").split(",")[0])
+
+
+def _photon(consulta, centro, cerca=None):
+    lat, lon = centro
+    params = {"q": consulta, "limit": 8, "lat": lat, "lon": lon,
+              "bbox": f"{lon - 0.25},{lat - 0.25},{lon + 0.25},{lat + 0.25}"}
+    if cerca:  # priorizar los tramos cercanos a este punto (otra calle del cruce)
+        params.update(lat=cerca[0], lon=cerca[1], zoom=16, location_bias_scale=0.1)
+    d = _pedir(PHOTON_URL, params)
+    out = []
+    for f in (d or {}).get("features") or []:
+        c = (f.get("geometry") or {}).get("coordinates") or []
+        if len(c) == 2:
+            p = f.get("properties") or {}
+            out.append((float(c[1]), float(c[0]), p.get("name") or "",
+                        p.get("type") == "street"))  # no paradas de bus
+    return out
+
+
+def _nominatim(consulta):
+    d = _pedir(GEOCODER_URL, {"q": consulta, "format": "json", "limit": 5,
+                              "countrycodes": "ec"})
+    return [(float(x["lat"]), float(x["lon"]), x.get("display_name", "").split(",")[0],
+             x.get("class") == "highway") for x in d or []]
+
+
+def _candidatos(consulta, centro):
+    """
+    Lugares posibles para la consulta dentro de la ciudad:
+    [(lat, lon, nombre, es_calle)]. Con cache.
+    """
+    clave = _norm(consulta) + f"|{centro[0]:.2f},{centro[1]:.2f}"
+    if clave in _geo_cache:
+        return _geo_cache[clave]
+    res = []
+    if GEOCODER in ("auto", "photon"):
+        res = _photon(consulta, centro)
+    if not res and GEOCODER in ("auto", "nominatim"):
+        res = _nominatim(consulta)
+    res = [x for x in res if _km(centro[0], centro[1], x[0], x[1]) <= _MAX_KM_PUNTO]
     _geo_cache[clave] = res
     return res
+
+
+def _geocodificar(consulta, centro=None):
+    """(lat, lon, nombre_lugar) del mejor candidato, o None."""
+    if centro is None:
+        return None
+    c = _candidatos(consulta, centro)
+    return c[0][:3] if c else None
+
+
+# "Calle Garcia Moreno y Martinez Mera 469" -> ["garcia moreno", "martinez mera"]
+_CONECTOR_CRUCE = re.compile(r"\s(?:y|e|esq|esquina|entre|con|interseccion)\s")
+_PREFIJO_CALLE = re.compile(r"^(?:calle|calles|av|avenida|avda|pasaje|psje|via|"
+                            r"diagonal|direccion|dir|en|la|el|de)\s+")
+
+
+def _calles_de(ref):
+    """Las calles de un cruce, o [] si la referencia no es un cruce."""
+    partes = _CONECTOR_CRUCE.split(f" {ref} ")
+    if len(partes) < 2:
+        return []
+    calles = []
+    for p in partes[:3]:
+        p = re.sub(r"\b(?:n|no|nro|numero|s n|sn|casa|lote|mz|manzana|barrio)\b", " ", p)
+        # numeros de casa fuera; los de calles-fecha ("9 de octubre") se quedan
+        p = re.sub(r"\b\d+[a-z]?\b(?!\s+de\b)", " ", p)
+        p = re.sub(r"\s+", " ", p).strip()
+        while True:
+            q = _PREFIJO_CALLE.sub("", p)
+            if q == p:
+                break
+            p = q
+        if len(p) >= 3 and not p.isdigit():
+            calles.append(p)
+    return calles if len(calles) >= 2 else []
+
+
+def _parece_cruce(n):
+    """'garcia moreno y martinez mera 4 69': dos nombres de 2+ palabras unidos por y/e."""
+    calles = _calles_de(n)
+    return bool(calles) and all(len(c.split()) >= 2 for c in calles[:2]) and len(n) <= 90
+
+
+def _cruce(calles, ciudad, centro):
+    """
+    Punto donde se cruzan las calles: (lat, lon, "Calle A y Calle B") o None.
+    Se busca cada calle y se toma el par de tramos mas cercano entre si.
+    """
+    listas = []
+    for c in calles[:2]:
+        cand = [x for x in _candidatos(f"{c}, {ciudad}", centro) if x[3]] \
+            or _candidatos(f"{c}, {ciudad}", centro)
+        if not cand:
+            return None
+        listas.append(cand)
+    def _par_mas_cercano(xs, ys):
+        mejor = None
+        for a in xs:
+            for b in ys:
+                d = _km(a[0], a[1], b[0], b[1])
+                if mejor is None or d < mejor[0]:
+                    mejor = (d, a, b)
+        return mejor
+
+    mejor = _par_mas_cercano(listas[0], listas[1])
+    if mejor and mejor[0] > _MAX_KM_CRUCE and GEOCODER in ("auto", "photon"):
+        # Avenidas largas: el geocoder solo devuelve algunos tramos. Se busca
+        # cada calle otra vez junto a la otra (maximo 2 peticiones mas).
+        for i, otra in ((0, 1), (1, 0)):
+            calles_i = [x for x in listas[otra] if x[3]][:1] or listas[otra][:1]
+            extra = [x for x in _photon(f"{calles[i]}, {ciudad}", centro, cerca=calles_i[0][:2])
+                     if x[3] and _km(centro[0], centro[1], x[0], x[1]) <= _MAX_KM_PUNTO]
+            listas[i] = listas[i] + extra
+            mejor = _par_mas_cercano(listas[0], listas[1])
+            if mejor[0] <= _MAX_KM_CRUCE:
+                break
+    if not mejor or mejor[0] > _MAX_KM_CRUCE:
+        return None
+    _, a, b = mejor
+    return ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, f"{a[2]} y {b[2]}")
 
 
 def referencias_de_lugar(textos, ciudad, provincia="", maximo=3, excluir=""):
@@ -251,7 +377,7 @@ def referencias_de_lugar(textos, ciudad, provincia="", maximo=3, excluir=""):
         if len(crudo) > 160:
             continue
         n = _norm(crudo)
-        if not any(p in f" {n} " or p in n for p in _PISTAS):
+        if not any(p in f" {n} " or p in n for p in _PISTAS) and not _parece_cruce(n):
             continue
         if nombre and len(nombre & set(n.split())) >= 2:
             # El mensaje trae el nombre: solo se usa la parte desde la pista de lugar.
@@ -285,12 +411,13 @@ def cercanas_por_referencia(ciudad, textos, provincia="", limite=3, nombre_clien
     if not agencias_c:
         return None
     for ref in referencias_de_lugar(textos, ciudad, provincia, excluir=nombre_cliente):
-        punto = _geocodificar(f"{ref}, {ciudad}, Ecuador")
+        calles = _calles_de(ref)
+        punto = _cruce(calles, ciudad, centro) if calles else None
+        if not punto:
+            punto = _geocodificar(f"{ref}, {ciudad}", centro)
         if not punto:
             continue
         lat, lon, nombre = punto
-        if _km(centro[0], centro[1], lat, lon) > _MAX_KM_PUNTO:
-            continue  # el geocoder encontro otro lugar homonimo
         orden = sorted(agencias_c,
                        key=lambda a: _km(lat, lon, a["Latitud"], a["Longitud"]))
         out = []

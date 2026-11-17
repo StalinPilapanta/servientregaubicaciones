@@ -86,13 +86,14 @@ pegas en el chat de Telegram (igual que con Dropi).
 - `/meta [periodo]` — Meta Ads por campaña · `/meta_conectar` / `/meta_desconectar`
 - `/resumen` — estadisticas del dia (ventas, facturacion, producto mas vendido)
 - `/ventas` — lista de pedidos de hoy
+- `/crear_pedido <teléfono>` — ficha de la venta (promo, agencia, riesgo) con el botón para crear el pedido en Dropi
 - `/en_agencia` — reporte HTML de pedidos en agencia Servientrega (MCP) con botón de WhatsApp
 - `/reporte_diario` — reporte completo del día (también automático a las 22:00)
 - `/guia <número>` — pedido de Dropi con esa guía: estado, cliente, agencia, productos (MCP)
 - `/dropi_pedidos [ESTADO] [n]` — pedidos de Dropi de los últimos 30 días + HTML (MCP)
 - `/dropi_conectar` / `/dropi_desconectar` — login OAuth del MCP de Dropi
 
-Siguen funcionando aunque ya no están en el menú: `/ficha`, `/crear`, `/pedido`,
+Siguen funcionando aunque ya no están en el menú: `/crear`, `/pedido`,
 `/campos`, `/pendientes`, `/retiro`, `/seguimiento`, `/dropi_saldo`
 (este último usa la API web con MFA, ver abajo).
 
@@ -140,6 +141,7 @@ El bot guarda dos archivos locales:
 | `PLANTILLA_RETIRO` / `PLANTILLA_NOVEDAD` | Nombres de las plantillas aprobadas |
 | `WA_TEMPLATE_NAMESPACE` | Namespace de plantillas de WhatsApp (ya viene el de la cuenta) |
 | `ALERTAS_ESTADO_PATH` | Estado de alertas/recordatorios (usar volumen) |
+| `VENTAS_NOTIFICADAS_PATH` | Ventas ya avisadas en Telegram; evita perder o repetir avisos al redesplegar (usar volumen) |
 | `META_APP_ID` / `META_APP_SECRET` | App de Meta para «Conectar con Facebook» |
 | `META_REDIRECT_URI` | Def. `http://localhost:19876/meta/oauth/callback` |
 | `META_LOGIN_CONFIG_ID` | Solo si usas «Facebook Login for Business» |
@@ -230,8 +232,9 @@ cliente responde o de corregir un dato en Chatea Pro) y rehace la ficha.
 | `NOTIFICAR_CLIENTE` | `true` (def.) envía la confirmación al cliente al crear |
 | `MAX_AGENCIAS_LISTA` | Hasta cuántas agencias se le listan al cliente (def. 10) |
 | `AGENCIAS_OFRECIDAS_PATH` | Registro de listas enviadas a clientes (usar volumen) |
-| `GEOCODER` | `nominatim` (def.) u `off` |
-| `GEOCODER_UA` | User-Agent para Nominatim (def. `ventas-bot/1.0`) |
+| `GEOCODER` | `auto` (def.: Photon y de respaldo Nominatim), `photon`, `nominatim` u `off`. Los cruces de calles ("García Moreno y Martínez Mera") se ubican buscando cada calle y tomando donde se cruzan; solo se sugieren agencias con entrega en oficina |
+| `PHOTON_URL` | def. `https://photon.komoot.io/api/` |
+| `GEOCODER_UA` | User-Agent para el geocodificador (def. `ventas-bot/1.0`) |
 | `DROPI_DIAS_DUPLICADO` | Días revisados para no duplicar (def. 3) |
 | `PEDIDOS_CREADOS_PATH` | Registro local de pedidos creados (usar volumen) |
 
