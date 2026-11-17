@@ -15,6 +15,7 @@ import time
 import datetime as dt
 
 import requests
+import datos
 
 BASE_URL = os.environ.get("CHATEAPRO_API_URL", "https://chateapro.app/api")
 API_TOKEN = os.environ.get("CHATEAPRO_API_TOKEN", "")
@@ -298,7 +299,7 @@ PREFIJO_DROPI = "[Dropi] Datos de la orden"
 # Dropi no expone la fecha exacta de ingreso a la oficina.
 RUTA_RETIROS = os.environ.get(
     "RETIROS_DB_PATH",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "retiros.json"),
+    datos.ruta("retiros.json"),
 )
 
 # Historico de guias en retiro: guarda la fila completa de cada guia detectada.
@@ -306,7 +307,7 @@ RUTA_RETIROS = os.environ.get(
 # pedido ni los dias sin retirar.
 RUTA_HISTORICO = os.environ.get(
     "RETIROS_HISTORICO_PATH",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "retiros_historico.json"),
+    datos.ruta("retiros_historico.json"),
 )
 
 # Caché en memoria de la base de guias->fecha de retiro.

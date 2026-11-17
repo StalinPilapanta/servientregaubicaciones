@@ -37,13 +37,14 @@ import time
 from urllib.parse import urlencode, urlparse, parse_qs
 
 import requests
+import datos
 
 MCP_URL = os.environ.get("DROPI_MCP_URL", "https://mcp.dropi.co/mcp")
 REDIRECT_URI = os.environ.get(
     "DROPI_MCP_REDIRECT_URI", "http://localhost:19876/mcp/oauth/callback")
 TOKEN_PATH = os.environ.get(
     "DROPI_MCP_TOKEN_PATH",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "dropi_mcp_token.json"),
+    datos.ruta("dropi_mcp_token.json"),
 )
 PROTOCOL_VERSION = "2025-06-18"
 CLIENT_NAME = "ventas-bot-telegram"

@@ -35,6 +35,7 @@ import time
 import tempfile
 
 import requests
+import datos
 
 API_GO = os.environ.get("DROPI_API_GO_URL", "https://api-v2.dropi.ec")
 API_CLASSIC = os.environ.get("DROPI_API_CLASSIC_URL", "https://api.dropi.ec")
@@ -48,7 +49,7 @@ COUNTRY_CODE = os.environ.get("DROPI_COUNTRY_CODE", "ec")
 
 TOKEN_PATH = os.environ.get(
     "DROPI_TOKEN_PATH",
-    os.path.join(tempfile.gettempdir(), "dropi_token.json"),
+    datos.ruta("dropi_token.json"),
 )
 
 # Token en memoria (se carga del cache en disco si existe).

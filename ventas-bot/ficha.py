@@ -23,6 +23,7 @@ import dropi_pedido
 import hermes
 import ia
 import promos
+import datos
 
 # Cache en memoria del analisis por suscriptor (para los botones).
 _CACHE = {}
@@ -40,7 +41,7 @@ NOTIFICAR_CLIENTE = os.environ.get("NOTIFICAR_CLIENTE", "true").lower() == "true
 MAX_AGENCIAS_LISTA = int(os.environ.get("MAX_AGENCIAS_LISTA", "10"))
 RUTA_OFRECIDAS = os.environ.get(
     "AGENCIAS_OFRECIDAS_PATH",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "agencias_ofrecidas.json"))
+    datos.ruta("agencias_ofrecidas.json"))
 
 MSG_PROMO = (
     "😊 ¡Hola! Le confirmamos que su pedido ya se encuentra correctamente ingresado "

@@ -28,6 +28,7 @@ import time
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import requests
+import datos
 
 APP_ID = os.environ.get("META_APP_ID", "")
 APP_SECRET = os.environ.get("META_APP_SECRET", "")
@@ -38,7 +39,7 @@ CUENTA_FIJA = os.environ.get("META_AD_ACCOUNT_ID", "")
 VERSION = os.environ.get("META_GRAPH_VERSION", "v24.0")
 TOKEN_PATH = os.environ.get(
     "META_TOKEN_PATH",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "meta_token.json"))
+    datos.ruta("meta_token.json"))
 GRAPH = f"https://graph.facebook.com/{VERSION}"
 ACCION_CONVERSACION = "onsite_conversion.messaging_conversation_started_7d"
 

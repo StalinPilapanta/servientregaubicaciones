@@ -244,10 +244,14 @@ cliente responde o de corregir un dato en Chatea Pro) y rehace la ficha.
 2. Build Pack: **Dockerfile**.
 3. NO necesita dominio ni puerto (usa polling).
 4. Configura las variables de entorno de arriba.
-5. Mountea un **volumen persistente** para `retiros.json` y
-   `retiros_historico.json` (o apunta `RETIROS_DB_PATH` /
-   `RETIROS_HISTORICO_PATH` a una ruta con volumen). Sin volumen se resetean en
-   cada deploy.
+5. **Persistencia (un solo volumen):** en la app → *Persistent Storage* →
+   *Add* → *Volume Mount*, nombre `ventas-bot-data`, Destination Path `/data`.
+   Luego agrega la variable `DATA_DIR=/data`. Ahí quedan todos los archivos de
+   estado: login de Dropi (`dropi_mcp_token.json`), acceso a Facebook
+   (`meta_token.json`), ventas avisadas, retiros, alertas, agencias ofrecidas y
+   pedidos creados. Sin volumen se borran en cada deploy (hay que reconectar
+   Dropi y se pierden los avisos). Cada archivo se puede mover aparte con su
+   variable `*_PATH`.
 6. Deploy.
 
 ## Prueba local

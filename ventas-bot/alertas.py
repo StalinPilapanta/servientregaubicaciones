@@ -28,10 +28,11 @@ import chateapro
 import dropi_mcp
 import dropi_pedido
 import reporte_agencia
+import datos
 
 RUTA_ESTADO = os.environ.get(
     "ALERTAS_ESTADO_PATH",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "alertas_estado.json"))
+    datos.ruta("alertas_estado.json"))
 RECORDATORIO_DIAS = int(os.environ.get("RECORDATORIO_DIAS", "2"))
 RECORDATORIO_MODO = os.environ.get("RECORDATORIO_MODO", "off").lower()  # desactivado por ahora
 PLANTILLA_RETIRO = os.environ.get("PLANTILLA_RETIRO",

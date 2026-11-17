@@ -68,6 +68,7 @@ import alertas
 import meta
 import asistente
 import transcribir
+import datos
 
 try:
     import dropi
@@ -1217,7 +1218,7 @@ def _enviar_reporte_diario():
 # que un reinicio/despliegue no "trague" las ventas que llegaron mientras tanto.
 NOTIFICADAS_PATH = os.environ.get(
     "VENTAS_NOTIFICADAS_PATH",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "ventas_notificadas.json"))
+    datos.ruta("ventas_notificadas.json"))
 _ya_notificadas = {}
 # Ultima revision de cada suscriptor: {user_ns: (ts, last_interaction)}.
 _ultima_revision = {}

@@ -33,6 +33,7 @@ import requests
 import agencias
 import chateapro
 import promos
+import datos
 
 URL = os.environ.get("HERMES_URL", "").strip()
 TOKEN = os.environ.get("HERMES_TOKEN", "").strip()
@@ -40,7 +41,7 @@ TIMEOUT = int(os.environ.get("HERMES_TIMEOUT", "120"))
 
 RUTA_CREADOS = os.environ.get(
     "PEDIDOS_CREADOS_PATH",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "pedidos_creados.json"),
+    datos.ruta("pedidos_creados.json"),
 )
 
 INSTRUCCION = (
