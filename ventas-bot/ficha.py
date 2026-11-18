@@ -66,17 +66,36 @@ MSG_AGENCIA = ("📍 Agencia Servientrega donde retira: *{nombre}*\n"
 _ETIQUETA_ESTADO = {"crm": "la que ya está en el CRM",
                     "cliente": "elegida por el cliente en el chat",
                     "unica": "única en la ciudad",
+                    "chat": "nombrada por el cliente en el chat",
                     "probable": "la más cercana al sector",
                     "geo": "la más cercana a la referencia del cliente"}
 
 
-def _buscar_agencia(textos):
+def _anclar_ciudad(t, ciudad_crm):
+    """
+    El buscador toma la ciudad mas larga que aparezca en el texto: en
+    "parada de guachi grande via Riobamba" (Ambato) elegia Riobamba. Si el CRM
+    ya tiene ciudad, se quitan las otras ciudades del texto y se antepone la
+    del CRM.
+    """
+    c = agencias._norm(ciudad_crm)
+    if not c:
+        return t
+    n = agencias._norm(t)
+    for otra in {agencias._norm(a.get("Ciudad")) for a in agencias._directorio()}:
+        if otra and otra != c and otra not in c and re.search(rf"\b{re.escape(otra)}\b", n):
+            n = re.sub(rf"\b{re.escape(otra)}\b", " ", n)
+    n = re.sub(r"\s+", " ", n).strip()
+    return n if re.search(rf"\b{re.escape(c)}\b", n) else f"{c} {n}".strip()
+
+
+def _buscar_agencia(textos, ciudad_crm=""):
     """Prueba cada texto de ubicacion y se queda con el mejor resultado."""
     mejor = None
     for t in textos:
         if not t:
             continue
-        r = agencias.buscar_agencia(t)
+        r = agencias.buscar_agencia(_anclar_ciudad(t, ciudad_crm))
         if mejor is None or _RANGO_ESTADO[r["estado"]] < _RANGO_ESTADO[mejor["estado"]]:
             mejor = r
         if r["estado"] in ("unica", "probable"):
@@ -99,7 +118,8 @@ def analizar(campos, forzar=False):
         error_chat = ""
     except Exception as e:  # el chat es un extra: la ficha sale igual
         chat, error_chat = [], str(e)
-    analisis_ia = ia.analizar_venta(chat, productos, valor)
+    analisis_ia = ia.analizar_venta(chat, productos, valor,
+                                    campos.get(chateapro.CAMPO_CIUDAD, ""))
 
     # --- promo: primero reglas sobre el CRM, luego IA ---
     cliente_txt = " ".join(_lineas_cliente({"chat": chat}, n=15))
@@ -120,8 +140,19 @@ def analizar(campos, forzar=False):
     res = agencias.desde_direccion_dropi(campos.get(chateapro.CAMPO_DIRECCION, ""))
     if not res:
         res = _respuesta_del_cliente(ns, chat)
+    ciudad_crm = campos.get(chateapro.CAMPO_CIUDAD, "")
+    if not res and ciudad_crm:
+        # Lo mas rapido y seguro: el cliente escribio el nombre de una agencia
+        # de su ciudad ("Guachi grande"). Del mensaje mas reciente al mas viejo.
+        textos_cli = list(reversed(_lineas_cliente({"chat": chat}, n=10, recorte=300)))
+        ag, txt = agencias.nombrada_en_textos(
+            ciudad_crm, textos_cli + [analisis_ia["ubicacion_texto"], colonia])
+        if ag:
+            res = agencias._resultado("chat", ag.get("ciudad") or ciudad_crm, ag, [],
+                                      len(agencias.de_ciudad(ciudad_crm, solo_retiro=True)),
+                                      f"El cliente escribió «{_recorta(txt, 60)}».")
     if not res:
-        res = _buscar_agencia([analisis_ia["ubicacion_texto"], crm_texto])
+        res = _buscar_agencia([analisis_ia["ubicacion_texto"], crm_texto], ciudad_crm)
     geo = None
     if res["estado"] in ("falta_sector", "sin_ciudad", "probable"):
         # El buscador no reconocio el sector, o lo emparejo por una palabra
@@ -145,7 +176,8 @@ def analizar(campos, forzar=False):
             res = dict(res, estado="geo", ciudad=ciudad,
                        sugerida=geo["agencias"][0], alternativas=alternativas)
     opciones = ([res["sugerida"]] if res["sugerida"] else []) + res["alternativas"]
-    elegida = (res["sugerida"] if res["estado"] in ("crm", "cliente", "unica", "probable", "geo")
+    elegida = (res["sugerida"] if res["estado"] in ("crm", "cliente", "chat", "unica",
+                                                    "probable", "geo")
                else None)
 
     # --- Dropi: ya existe un pedido con este telefono? ---
@@ -232,7 +264,8 @@ def ciudad_de(a):
 
 
 def agencias_ciudad(a):
-    return agencias.de_ciudad(ciudad_de(a)) if ciudad_de(a) else []
+    """Agencias de la ciudad donde el cliente PUEDE retirar (Entrega_en_oficina SI)."""
+    return agencias.de_ciudad(ciudad_de(a), solo_retiro=True) if ciudad_de(a) else []
 
 
 def mensaje_pedir_agencia(a):
@@ -270,7 +303,10 @@ def pedir_agencia(a):
     return ok, det
 
 
-def ver_agencias(a, limite=12):
+MAX_BOTONES_AGENCIA = 60  # Telegram admite hasta 100 botones por mensaje
+
+
+def ver_agencias(a, limite=MAX_BOTONES_AGENCIA):
     """Pone como opciones todas las agencias de la ciudad (para elegir a mano)."""
     lista = agencias_ciudad(a)
     if not lista:
@@ -438,15 +474,23 @@ def teclado(a):
     if not bloqueos(a):
         filas.append([{"text": "✅ Crear pedido en Dropi", "callback_data": f"crear:{ns}"}])
     # Agencias para cambiar o elegir (3 sugeridas, o la ciudad completa).
-    for i, ag in enumerate(a["opciones"][:12]):
+    opciones = a["opciones"][:MAX_BOTONES_AGENCIA]
+    por_fila = 2 if len(opciones) > 6 else 1   # ciudad completa: 2 columnas
+    fila = []
+    for i, ag in enumerate(opciones):
         marca = "● " if a["elegida"] is ag else ""
-        filas.append([{"text": f"{marca}🏢 {ag.get('nombre', '?')}"[:60],
-                       "callback_data": f"ag:{ns}:{i}"}])
+        nombre = agencias.nombre_corto(ag).title() if por_fila > 1 else ag.get("nombre", "?")
+        fila.append({"text": f"{marca}🏢 {nombre}"[:60], "callback_data": f"ag:{ns}:{i}"})
+        if len(fila) == por_fila:
+            filas.append(fila)
+            fila = []
+    if fila:
+        filas.append(fila)
     n_ciudad = len(agencias_ciudad(a))
     if n_ciudad > len(a["opciones"]):
         filas.append([{"text": f"🗂️ Ver agencias de {ciudad_de(a).title()} ({n_ciudad})"[:60],
                        "callback_data": f"va:{ns}"}])
-    if not a["elegida"] or a["agencia_res"]["estado"] not in ("crm", "cliente", "unica"):
+    if not a["elegida"] or a["agencia_res"]["estado"] not in ("crm", "cliente", "chat", "unica"):
         filas.append([{"text": "📲 Pedir agencia/sector al cliente",
                        "callback_data": f"ps:{ns}"}])
     filas.append([{"text": "🔄 Reanalizar (relee CRM y chat)", "callback_data": f"re:{ns}"}])

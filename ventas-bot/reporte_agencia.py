@@ -204,7 +204,7 @@ def mensaje_whatsapp(p, ag):
         f"📍 Dirección: {ag['direccion']}\n"
         f"🔖 Guía: {p['guia']}\n"
         f"🕒 Horario: {ag['horario']}\n\n"
-        "Recuerde presentar su cédula al momento del retiro.\n"
+        "Para retirarlo solo indique su número de guía en la agencia.\n"
         "¿Nos confirma si lo va a retirar el día de hoy? 🙌"
     )
 

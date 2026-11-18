@@ -88,6 +88,8 @@ SIEMPRE dar primero el precio de 2 frascos e inmediatamente la promo de 4 como l
 
 ⭐ **PRIORIDAD SERVIENTREGA:** Por defecto, TODO envío se intenta cuadrar primero para retiro en Agencia Servientrega.
 
+🔖 **PARA RETIRAR:** la clienta solo necesita su **número de guía** (se lo enviamos cuando se genere). NUNCA digas que lleve cédula ni otro documento.
+
 **Paso 1 (Primer filtro):**
 "Claro que sí amiga 😊 enviamos a todo el país por Servientrega y pagas al retirar de forma segura. ¿De qué ciudad y sector me escribes para buscarte la agencia más cercana?"
 

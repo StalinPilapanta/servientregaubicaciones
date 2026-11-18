@@ -25,6 +25,7 @@ sufijo "+batana" si el cliente pago el aceite aparte (ej. 1 Mega Red +
 Batana = $35.99).
 """
 
+import copy
 import re
 import unicodedata
 
@@ -54,7 +55,7 @@ EMBUDOS = {
     },
     "drenaje": {
         "nombre": "Drenaje Linfatico",
-        "ids_crm": (186883, 196169, 193483),
+        "ids_crm": (186883, 196169, 193483, 202300),
         "palabras": ("drenaje", "linfatico", "linfatic"),
         # 186883 es la PROMOCION 2X1: cada unidad trae 2 frascos.
         "producto": {
@@ -66,6 +67,41 @@ EMBUDOS = {
         "regalo_desde": 4,
     },
 }
+
+# --- Combos fijos ---
+# Un embudo con "combos" sube EXACTAMENTE esos items (producto, cantidad y
+# precio) en vez de repartir el total. Asi cargan NAD Pro Max las otras
+# cuentas (50 pedidos c/u, 09-18/11/2026):
+#   1 frasco  = 1x NAD PRO MAX $24.99                               (19 pedidos)
+#   2 frascos = 2x NAD PRO MAX $15 + 1x CANDELA $4.99 = $34.99      (10 pedidos)
+#               (otra cuenta: 2x $12 + Batana $10.99 = $34.99)
+#   3 frascos = 3x NAD PRO MAX $12 + 1x Batana $8.99 = $44.99       (1 pedido)
+# En el CRM aparece como 149084 o 18186 ("Nad + Promax"); se sube 149084.
+
+def _it(id_, nombre, precio, cantidad=1):
+    return {"id": id_, "nombre": nombre, "price": precio, "quantity": cantidad}
+
+
+NAD = (149084, "NAD PRO MAX")
+CANDELA = (175317, "CANDELA")
+
+EMBUDOS["nad"] = {
+    "nombre": "NAD Pro Max",
+    "ids_crm": (149084, 18186),
+    # "nad" solo no: tambien esta dentro de "nada".
+    "palabras": ("nad pro", "nad +", "nad+", "promax", "pro max"),
+    "combos": {
+        1: [_it(*NAD, 24.99)],
+        2: [_it(*NAD, 15.00, 2), _it(*CANDELA, 4.99)],
+        3: [_it(*NAD, 12.00, 3), _it(BATANA["id"], BATANA["nombre"], 8.99)],
+    },
+    "precio_frasco_desde_7": None,
+    "regalo_desde": 2,
+}
+for _e in EMBUDOS.values():
+    if "combos" in _e:  # el total de cada combo es su precio
+        _e["precios"] = {n: round(sum(x["price"] * x["quantity"] for x in c), 2)
+                         for n, c in _e["combos"].items()}
 
 # Productos de un solo item que se venden sueltos (sin escalera).
 SUELTOS = {
@@ -85,6 +121,56 @@ BUSQUEDA_STOCK = {
     111484: "TURKESTERONE",
     204734: "AURELYS 35ML",
     120461: "Her loss",
+    196169: "DRENAJE LINFATICO 30ML X3",
+    193483: "DRENAJE LINFATICO 30 ML",
+    202300: "Drenaje Linfatico x2",
+    # NAD y su Candela son del proveedor 15819; con el proveedor la busqueda
+    # no se pierde entre los otros "NAD"/"CANDELA" del catalogo.
+    149084: ("NAD PRO MAX", 15819),
+    175317: ("CANDELA", 15819),  # regalo de NAD 2 frascos
+    146736: "VIGORMAX",
+    107177: "BIOKIDS MORINGA X2",
+    118567: "BIOKIDS MORINGA",
+    61427: "MAGNESIUM CITRATE KIDS",
+}
+
+# Catalogo de productos de Dropi que se venden en las cuentas, con su id.
+# Sacado de los pedidos reales (20/10 - 18/11/2026) de los conectores de
+# Dropi de cada cuenta. "cuentas": donde aparece vendido. Los precios son
+# los vistos en los pedidos (dependen de la promo/combinacion).
+#   vitashop = conector 5380b46f
+#   cuenta_a = conector 2478aa1f  (Mona o Import360: confirmar)
+#   cuenta_b = conector 5449aec9  (Mona o Import360: confirmar)
+CATALOGO = {
+    148700: {"nombre": "MEGA RED PRIV", "cuentas": ("vitashop", "cuenta_a", "cuenta_b"),
+             "precios_vistos": "1 x $27.99; 2 x $13-$16.95 en combos"},
+    14235: {"nombre": "Mega Red 3", "cuentas": ("vitashop", "cuenta_b"),
+            "precios_vistos": "1 x $27.99"},
+    186883: {"nombre": "PROMOCION DRENAJE LINFATICO 30 ML 2X1",
+             "cuentas": ("vitashop", "cuenta_a", "cuenta_b"),
+             "precios_vistos": "$11.99-$16.99 en combo con X3; 2 x $13"},
+    196169: {"nombre": "DRENAJE LINFATICO 30ML X3 UNIDADES", "cuentas": ("cuenta_a", "cuenta_b"),
+             "precios_vistos": "1 x $21 (combo con 2X1); 2 x $18.99-$24"},
+    193483: {"nombre": "DRENAJE LINFATICO 30 ML", "cuentas": ("cuenta_b",),
+             "precios_vistos": "1 x $9.99 (combo)"},
+    202300: {"nombre": "Drenaje Linfatico x2", "cuentas": ("cuenta_a",),
+             "precios_vistos": "1 x $27.99"},
+    149084: {"nombre": "NAD PRO MAX", "cuentas": ("cuenta_a", "cuenta_b"),
+             "precios_vistos": "1 x $24.99 o $27.99; 2 x $15-$17.49; 3 x $12"},
+    175317: {"nombre": "CANDELA", "cuentas": ("cuenta_a",),
+             "precios_vistos": "1 x $4.99 (complemento de NAD)"},
+    146736: {"nombre": "VIGORMAX", "cuentas": ("cuenta_a",),
+             "precios_vistos": "1 x $3.09 (complemento de Mega Red)"},
+    107177: {"nombre": "BIOKIDS MORINGA X2", "cuentas": ("cuenta_b",),
+             "precios_vistos": "1 x $24; 2 x $22"},
+    118567: {"nombre": "BIOKIDS MORINGA", "cuentas": ("cuenta_b",),
+             "precios_vistos": "1 x $13"},
+    61427: {"nombre": "MAGNESIUM CITRATE KIDS", "cuentas": ("cuenta_b",),
+            "precios_vistos": "1 x $13"},
+    86248: {"nombre": "ACEITE BATANA OIL", "cuentas": ("vitashop", "cuenta_a", "cuenta_b"),
+            "precios_vistos": "regalo/complemento $2.25-$11.99"},
+    111484: {"nombre": "TURKESTERONE", "cuentas": ("vitashop", "cuenta_b"),
+             "precios_vistos": "regalo/complemento $11.99"},
 }
 
 _TOLERANCIA = 0.15
@@ -158,6 +244,12 @@ def armar(clave):
 
     emb, frascos, batana = _partes(clave)
     e = EMBUDOS[emb]
+    if frascos in e.get("combos", {}):
+        items = copy.deepcopy(e["combos"][frascos])
+        if batana:
+            items.append({"id": BATANA["id"], "nombre": BATANA["nombre"],
+                          "price": PRECIO_BATANA_EXTRA, "quantity": 1})
+        return items
     total = _total_escalera(emb, frascos)
     prod = e["producto"].get(frascos) or e["producto"]["defecto"]
     unidades = max(1, frascos // prod["frascos_por_unidad"])

@@ -308,10 +308,18 @@ def buscar_guia(numero, dias=89):
 # ----------------------------------------------------------------- stock --
 
 def stock(producto_id, busqueda):
-    """Stock del producto en Dropi (int) o None si no se pudo encontrar."""
+    """
+    Stock del producto en Dropi (int) o None si no se pudo encontrar.
+    busqueda: texto, o (texto, supplier_id) cuando hay muchos productos con
+    ese nombre ("CANDELA") y el buscado no sale en la primera pagina.
+    """
+    texto, proveedor = busqueda if isinstance(busqueda, tuple) else (busqueda, None)
+
     def cargar():
-        res = dropi_mcp.llamar("list_products", {
-            "search": busqueda, "get_stock": True, "page_size": 50})
+        params = {"search": texto, "get_stock": True, "page_size": 50}
+        if proveedor:
+            params["supplier_id"] = proveedor
+        res = dropi_mcp.llamar("list_products", params)
         for p in _items(res):
             if int(p.get("id") or 0) == int(producto_id):
                 return int(p.get("stock") or 0)

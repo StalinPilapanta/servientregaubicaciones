@@ -157,7 +157,9 @@ _ultimo_geo = 0.0
 _PISTAS = ("sector", "barrio", "cdla", "ciudadela", "colegio", "escuela", "parque",
            "av ", "av.", "avenida", "calle", "cerca", "frente", "junto", "mercado",
            "iglesia", "hospital", "redondel", "terminal", "universidad", "centro",
-           "norte", "sur", "via ", "km")
+           "norte", "sur", "via ", "km", "parada", "estadio", "gasolinera",
+           "supermercado", "mall", "plaza", "coliseo", "urbanizacion", "conjunto",
+           "entrada", "redondel", "cancha", "hotel", "banco", "farmacia")
 
 
 def _norm(t):
@@ -446,11 +448,90 @@ def desde_direccion_dropi(direccion):
     return None
 
 
-def de_ciudad(ciudad):
-    """Todas las agencias del directorio en esa ciudad (formato limpio)."""
+def es_retiro(a):
+    """True si en la agencia el cliente puede retirar (Entrega_en_oficina != NO)."""
+    v = a.get("entrega_en_oficina", a.get("Entrega_en_oficina", ""))
+    return _norm(v) != "no"
+
+
+def de_ciudad(ciudad, solo_retiro=False):
+    """
+    Agencias del directorio en esa ciudad (formato limpio).
+    solo_retiro=True deja fuera las que tienen Entrega_en_oficina = NO
+    (no entregan paquetes al cliente: no sirven para retiro).
+    """
     c = _norm(ciudad)
     lista = [_formato(a) for a in _directorio() if _norm(a.get("Ciudad")) == c]
+    if solo_retiro:
+        lista = [a for a in lista if es_retiro(a)]
     return sorted(lista, key=lambda a: (a.get("sector") or "", a.get("nombre") or ""))
+
+
+# ----------------------------------- agencia nombrada por el cliente en el chat --
+#
+# Muchos clientes responden solo con el nombre de la zona, que suele ser el
+# nombre de la agencia: "Guachi grande" -> AMBATO_HUACHI GRANDE. Se compara
+# con una forma "fonetica" para tolerar como escriben en Ecuador
+# (gua/hua, v/b, z/s/c, ll/y, h muda) y errores de 1-2 letras.
+
+# Nombres demasiado genericos para tomarlos como eleccion del cliente.
+_NOMBRES_GENERICOS = {"principal", "centro", "norte", "sur", "matriz", "oficina",
+                      "agencia", "terminal", "mercado", "central"}
+
+
+def _fonetica(t):
+    t = f" {_norm(t)} "
+    t = re.sub(r" [gh]?u(?=[aei])", " w", t)       # guachi/huachi/uachi -> wachi
+    t = re.sub(r" h", " ", t)                        # h muda inicial
+    t = t.replace("ll", "y").replace("v", "b").replace("z", "s")
+    t = re.sub(r"c(?=[ei])", "s", t)
+    t = re.sub(r"(.)\1", r"\1", t)                   # letras dobles
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _palabra_parecida(a, b):
+    if a == b:
+        return True
+    if len(a) < 5 or abs(len(a) - len(b)) > 1:
+        return False
+    from difflib import SequenceMatcher
+    return SequenceMatcher(None, a, b).ratio() >= 0.85
+
+
+def _contiene_nombre(texto_fon, clave_fon):
+    """La frase clave (ya fonetica) aparece en el texto, tolerando typos."""
+    if f" {clave_fon} " in f" {texto_fon} ":
+        return True
+    pt, pc = texto_fon.split(), clave_fon.split()
+    for i in range(len(pt) - len(pc) + 1):
+        if all(_palabra_parecida(pt[i + j], pc[j]) for j in range(len(pc))):
+            return True
+    return False
+
+
+def nombrada_en_textos(ciudad, textos):
+    """
+    Busca, del texto mas reciente al mas antiguo, si el cliente nombro una
+    agencia de su ciudad. Devuelve (agencia_formateada, texto) o (None, None).
+    Si un texto nombra varias, gana el nombre mas largo (HUACHI GRANDE > HUACHI).
+    """
+    lista = de_ciudad(ciudad, solo_retiro=True)
+    claves = []
+    for a in lista:
+        clave = _fonetica(nombre_corto(a))
+        if len(clave) < 4 or clave in _NOMBRES_GENERICOS:
+            continue
+        claves.append((clave, a))
+    if not claves:
+        return None, None
+    for t in textos:
+        if not t:
+            continue
+        tf = _fonetica(t)
+        hallados = [(c, a) for c, a in claves if _contiene_nombre(tf, c)]
+        if hallados:
+            return max(hallados, key=lambda x: len(x[0]))[1], t
+    return None, None
 
 
 def nombre_corto(a):
