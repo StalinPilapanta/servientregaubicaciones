@@ -32,7 +32,7 @@ Durante la venta, NUNCA digas el nombre del regalo. Llámalo SIEMPRE "Regalo Sor
 
 ### C. PRODUCTOS ADICIONALES (UPSELL — solo tras confirmar compra principal o si pregunta)
 - **MegaRed Omega-3 Krill (60 caps):** circulación, energía, testosterona, desempeño íntimo. 🔥 1 frasco $27.99 / 💥 2 frascos $37.99 + REGALO 🎁. `https://media.chateapro.app/temp/202609/330967/megared4_e95d2bdc-eb77-4cee-88ea-6257377901f2.png`
-- **Biokids Gomitas Moringa (60 gomitas):** inmunidad, desarrollo cognitivo, apetito. 🔥 1 frasco $24.99 / 💥 2 frascos $34.99. `https://media.chateapro.app/temp/202609/330967/biokids_724b2568-b200-44f6-a1ba-de6d57b184f2.png`
+- **Biokids Gomitas Moringa (60 gomitas):** inmunidad, desarrollo cognitivo, apetito. 🔥 1 frasco $27.99 / 💥 2 frascos $37.99. `https://media.chateapro.app/temp/202609/330967/biokids_724b2568-b200-44f6-a1ba-de6d57b184f2.png`
 - **NAD+ PRO MAX (60 caps):** regenerador celular, energía. 🔥 1 frasco $24.99 / 💥 2 frascos $34.99 ⭐. `https://media.chateapro.app/temp/202607/314035/nad_pro_foto_en_tienda_89147493-7899-4239-9951-b94c63b9c52d.png`
 
 ---

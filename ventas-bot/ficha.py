@@ -145,8 +145,20 @@ def analizar(campos, forzar=False):
         # Lo mas rapido y seguro: el cliente escribio el nombre de una agencia
         # de su ciudad ("Guachi grande"). Del mensaje mas reciente al mas viejo.
         textos_cli = list(reversed(_lineas_cliente({"chat": chat}, n=10, recorte=300)))
-        ag, txt = agencias.nombrada_en_textos(
-            ciudad_crm, textos_cli + [analisis_ia["ubicacion_texto"], colonia])
+        textos_ag = textos_cli + [analisis_ia["ubicacion_texto"], colonia]
+        ag, txt = agencias.nombrada_en_textos(ciudad_crm, textos_ag)
+        # Agencia que NO entrega al cliente ("La Mena 2"): si la nombro despues
+        # que cualquier agencia con retiro, se ofrecen las mas cercanas a ella.
+        sr = agencias.cercanas_a_sin_retiro(ciudad_crm, textos_ag)
+        pos = lambda t: textos_ag.index(t) if t in textos_ag else len(textos_ag)
+        if sr and sr["agencias"] and (not ag or pos(sr["texto"]) < pos(txt)):
+            ag = None
+            corto = sr["nombrada"].split("_", 1)[-1].title()
+            res = agencias._resultado(
+                "geo", ciudad_crm, sr["agencias"][0], sr["agencias"][1:],
+                len(agencias.de_ciudad(ciudad_crm, solo_retiro=True)),
+                f"El cliente pidió «{corto}», pero esa agencia no entrega paquetes al "
+                f"cliente; estas son las más cercanas a ella.")
         if ag:
             res = agencias._resultado("chat", ag.get("ciudad") or ciudad_crm, ag, [],
                                       len(agencias.de_ciudad(ciudad_crm, solo_retiro=True)),
@@ -303,21 +315,35 @@ def pedir_agencia(a):
     return ok, det
 
 
-MAX_BOTONES_AGENCIA = 60  # Telegram admite hasta 100 botones por mensaje
 
 
-def ver_agencias(a, limite=MAX_BOTONES_AGENCIA):
-    """Pone como opciones todas las agencias de la ciudad (para elegir a mano)."""
+POR_PAGINA = 40  # agencias por pagina en "ver agencias" (2 columnas = 20 filas)
+
+
+def ver_agencias(a):
+    """
+    Pone como opciones TODAS las agencias de la ciudad (para elegir a mano).
+    Si son mas de POR_PAGINA se muestran por paginas (botones ◀ ▶, accion pg).
+    """
     lista = agencias_ciudad(a)
     if not lista:
         return 0
-    if a["elegida"] and all(x["nombre"] != a["elegida"]["nombre"] for x in lista[:limite]):
+    if a["elegida"] and all(x["nombre"] != a["elegida"]["nombre"] for x in lista):
         lista = [a["elegida"]] + lista
-    a["opciones"] = lista[:limite]
+    a["opciones"] = lista
+    a["pagina"] = 0
     if a["elegida"]:
         a["elegida"] = next((x for x in a["opciones"]
                              if x["nombre"] == a["elegida"]["nombre"]), a["elegida"])
+        a["pagina"] = a["opciones"].index(a["elegida"]) // POR_PAGINA
     return len(agencias_ciudad(a))
+
+
+def ir_pagina(a, pagina):
+    """Cambia la pagina de la lista de agencias. Devuelve la pagina final."""
+    total = max(1, -(-len(a["opciones"]) // POR_PAGINA))
+    a["pagina"] = max(0, min(int(pagina), total - 1))
+    return a["pagina"]
 
 
 def faltantes(a):
@@ -474,10 +500,15 @@ def teclado(a):
     if not bloqueos(a):
         filas.append([{"text": "✅ Crear pedido en Dropi", "callback_data": f"crear:{ns}"}])
     # Agencias para cambiar o elegir (3 sugeridas, o la ciudad completa).
-    opciones = a["opciones"][:MAX_BOTONES_AGENCIA]
-    por_fila = 2 if len(opciones) > 6 else 1   # ciudad completa: 2 columnas
+    todas = a["opciones"]
+    paginas = max(1, -(-len(todas) // POR_PAGINA))
+    pag = min(a.get("pagina", 0), paginas - 1)
+    desde = pag * POR_PAGINA
+    opciones = todas[desde:desde + POR_PAGINA]
+    por_fila = 2 if len(todas) > 6 else 1   # ciudad completa: 2 columnas
     fila = []
-    for i, ag in enumerate(opciones):
+    for j, ag in enumerate(opciones):
+        i = desde + j                       # indice en a["opciones"] (ag:ns:i)
         marca = "● " if a["elegida"] is ag else ""
         nombre = agencias.nombre_corto(ag).title() if por_fila > 1 else ag.get("nombre", "?")
         fila.append({"text": f"{marca}🏢 {nombre}"[:60], "callback_data": f"ag:{ns}:{i}"})
@@ -486,6 +517,15 @@ def teclado(a):
             fila = []
     if fila:
         filas.append(fila)
+    if paginas > 1:
+        nav = []
+        if pag > 0:
+            nav.append({"text": "◀ Anteriores", "callback_data": f"pg:{ns}:{pag - 1}"})
+        nav.append({"text": f"{desde + 1}–{desde + len(opciones)} de {len(todas)}",
+                    "callback_data": f"pg:{ns}:{pag}"})
+        if pag < paginas - 1:
+            nav.append({"text": "Más ▶", "callback_data": f"pg:{ns}:{pag + 1}"})
+        filas.append(nav)
     n_ciudad = len(agencias_ciudad(a))
     if n_ciudad > len(a["opciones"]):
         filas.append([{"text": f"🗂️ Ver agencias de {ciudad_de(a).title()} ({n_ciudad})"[:60],

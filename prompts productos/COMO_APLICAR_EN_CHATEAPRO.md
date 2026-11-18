@@ -91,7 +91,7 @@ Pago: 1 a 7 frascos → contra entrega. 8 o más → adelanto de $10.
 
 PRODUCTOS ADICIONALES (UPSELL — solo tras confirmar la compra principal o si el cliente pregunta):
 - MegaRed Omega-3 Krill (60 caps): circulación, energía, desempeño íntimo. 1 frasco $27.99 / 2 frascos $37.99 + regalo. https://media.chateapro.app/temp/202609/330967/megared4_e95d2bdc-eb77-4cee-88ea-6257377901f2.png
-- Biokids Gomitas Moringa (60): inmunidad, desarrollo, apetito. 1 frasco $24.99 / 2 frascos $34.99. https://media.chateapro.app/temp/202609/330967/biokids_724b2568-b200-44f6-a1ba-de6d57b184f2.png
+- Biokids Gomitas Moringa (60): inmunidad, desarrollo, apetito. 1 frasco $27.99 / 2 frascos $37.99. https://media.chateapro.app/temp/202609/330967/biokids_724b2568-b200-44f6-a1ba-de6d57b184f2.png
 - NAD+ PRO MAX (60 caps): regenerador celular, energía. 1 frasco $24.99 / 2 frascos $34.99. https://media.chateapro.app/temp/202607/314035/nad_pro_foto_en_tienda_89147493-7899-4239-9951-b94c63b9c52d.png
 
 PÁGINA WEB / CATÁLOGO:

@@ -431,6 +431,49 @@ def cercanas_por_referencia(ciudad, textos, provincia="", limite=3, nombre_clien
     return None
 
 
+def cercanas_a_sin_retiro(ciudad, textos, limite=3):
+    """
+    El cliente nombro una agencia que NO entrega al cliente (Entrega_en_oficina
+    = NO, p. ej. QUITO_LA MENA 2). Devuelve las agencias con retiro mas
+    cercanas a ella:
+      {"nombrada": "QUITO_LA MENA 2", "texto": "O mena dos",
+       "agencias": [ {..agencia.., "distancia_km": 0.9}, ... ]}
+    o None si no nombro ninguna o no hay coordenadas.
+    """
+    c = _norm(ciudad)
+    sin_retiro = [a for a in _directorio() if _norm(a.get("Ciudad")) == c
+                  and _norm(a.get("Entrega_en_oficina")) == "no"
+                  and isinstance(a.get("Latitud"), (int, float))]
+    claves = []
+    for a in sin_retiro:
+        clave = _fonetica(nombre_corto(_formato(a)))
+        if len(clave) >= 4 and clave not in _NOMBRES_GENERICOS:
+            claves.append((clave, a))
+    if not claves:
+        return None
+    agencias_c, _ = _agencias_ciudad(ciudad)
+    if not agencias_c:
+        return None
+    for t in textos:
+        if not t:
+            continue
+        tf = _fonetica(t)
+        hallados = [(cl, a) for cl, a in claves if _contiene_nombre(tf, cl)]
+        if not hallados:
+            continue
+        ref = max(hallados, key=lambda x: len(x[0]))[1]
+        orden = sorted(agencias_c, key=lambda a: _km(ref["Latitud"], ref["Longitud"],
+                                                    a["Latitud"], a["Longitud"]))
+        out = []
+        for a in orden[:limite]:
+            f = _formato(a)
+            f["distancia_km"] = round(_km(ref["Latitud"], ref["Longitud"],
+                                          a["Latitud"], a["Longitud"]), 1)
+            out.append(f)
+        return {"nombrada": ref.get("Nombre_agencia", ""), "texto": t, "agencias": out}
+    return None
+
+
 def desde_direccion_dropi(direccion):
     """
     Si la Direccion del CRM ya viene en formato Dropi
@@ -479,8 +522,18 @@ _NOMBRES_GENERICOS = {"principal", "centro", "norte", "sur", "matriz", "oficina"
                       "agencia", "terminal", "mercado", "central"}
 
 
+_NUMEROS_PALABRA = {"uno": "1", "una": "1", "dos": "2", "tres": "3", "cuatro": "4",
+                    "cinco": "5", "seis": "6", "siete": "7", "ocho": "8", "nueve": "9",
+                    "diez": "10"}
+_ARTICULOS = re.compile(r" (?:la|el|los|las|de|del) ")
+
+
 def _fonetica(t):
     t = f" {_norm(t)} "
+    # "mena dos" = "LA MENA 2": numeros en palabras -> cifras y sin articulos.
+    t = re.sub(r"\b(" + "|".join(_NUMEROS_PALABRA) + r")\b", lambda m: _NUMEROS_PALABRA[m.group(1)], t)
+    while _ARTICULOS.search(t):
+        t = _ARTICULOS.sub(" ", t)
     t = re.sub(r" [gh]?u(?=[aei])", " w", t)       # guachi/huachi/uachi -> wachi
     t = re.sub(r" h", " ", t)                        # h muda inicial
     t = t.replace("ll", "y").replace("v", "b").replace("z", "s")

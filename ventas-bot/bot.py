@@ -366,6 +366,13 @@ def manejar_callback(cb):
                 editar_plano(chat_id, message_id,
                              ficha.texto_confirmacion(a) + "\n\n⏳ Creando pedido en Dropi...")
             _correr_en_hilo(chat_id, message_id, a, _crear)
+        elif accion == "pg" and len(partes) == 3:
+            a = _ficha_de(ns)
+            if len(a.get("opciones") or []) <= ficha.POR_PAGINA:
+                ficha.ver_agencias(a)
+            p = ficha.ir_pagina(a, partes[2])
+            responder_callback(cb_id, f"Página {p + 1}")
+            editar_plano(chat_id, message_id, ficha.texto_ficha(a), ficha.teclado(a))
         elif accion == "va":
             a = _ficha_de(ns)
             n = ficha.ver_agencias(a)
