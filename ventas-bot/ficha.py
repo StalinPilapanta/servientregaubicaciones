@@ -499,6 +499,29 @@ def teclado(a):
 
 # ------------------------------------------------------------------ crear --
 
+def _elegir_armado(promo):
+    """
+    Prueba las alternativas de armado de la promo (promos.opciones) en orden y
+    devuelve (clave, faltantes, lineas_stock) de la primera que tenga stock de
+    todo y se pueda ver en Dropi. Si ninguna se pudo verificar completa, usa la
+    primera sin faltantes; si todas tienen faltantes, devuelve los de la primera.
+    """
+    primera = sin_faltantes = None
+    for i, clave in enumerate(promos.opciones(promo)):
+        faltan, lineas = dropi_pedido.revisar_stock(promos.armar(clave), promos.BUSQUEDA_STOCK)
+        if i:
+            lineas = [f"(alternativa {i + 1}) {x}" for x in lineas]
+        if primera is None:
+            primera = (clave, faltan, lineas)
+        if faltan:
+            continue
+        if not any("no pude verificar" in x for x in lineas):
+            return clave, [], lineas
+        if sin_faltantes is None:
+            sin_faltantes = (clave, [], lineas)
+    return sin_faltantes or primera
+
+
 def preparar(a):
     """
     Paso 1 del boton Crear: resuelve ciudad/departamento en Dropi y cotiza
@@ -509,18 +532,19 @@ def preparar(a):
     if motivos:
         return False, "; ".join(motivos)
     ag = a["elegida"]
-    datos = hermes.armar_datos(a["campos"], a["promo"], ag)
     try:
         destino = dropi_pedido.resolver_destino(
             ag.get("ciudad") or a["agencia_res"].get("ciudad"),
             ag.get("provincia") or a["campos"].get(chateapro.CAMPO_PROVINCIA, ""))
     except dropi_pedido.DestinoError as e:
         return False, str(e)
-    faltan, stock_lineas = dropi_pedido.revisar_stock(
-        promos.armar(a["promo"]), promos.BUSQUEDA_STOCK)
+    clave, faltan, stock_lineas = _elegir_armado(a["promo"])
     if faltan:
         return False, ("SIN STOCK en Dropi: " + "; ".join(faltan)
                        + ". Créalo a mano en Dropi (con otro producto) o espera reposición.")
+    if clave != a["promo"]:
+        a["promo"] = clave  # la confirmacion y la creacion usan este armado
+    datos = hermes.armar_datos(a["campos"], a["promo"], ag)
     cot = dropi_pedido.cotizar(destino, datos["products"], datos["dir"])
     if not cot["ok"]:
         return False, cot["error"] + " Si persiste, créalo a mano en Dropi."

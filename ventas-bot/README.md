@@ -120,6 +120,9 @@ El bot guarda dos archivos locales:
 | `CHATEAPRO_API_TOKEN` | Token de la API de Chatea Pro |
 | `CHATEAPRO_CACHE_TTL_SECONDS` | TTL del cache de campos (default `300`). Evita saturar el API |
 | `CHECK_INTERVAL_SECONDS` | Intervalo del ciclo de revision (default `120`) |
+| `TIENDA_URL` | URL de la tienda web (proyecto `tienda/`). Sin ella no se leen pedidos web |
+| `TIENDA_API_KEY` | Misma clave `TIENDA_API_KEY` configurada en la tienda |
+| `TIENDA_CHECK_SECONDS` | Cada cuanto revisar pedidos web nuevos (default `60`) |
 | `REVISAR_NUEVOS_INTERVAL_SECONDS` | Cada cuanto re-consultar nuevos (default `1800`) |
 | `SCAN_DELAY_SECONDS` | Pausa entre peticiones en escaneos grandes (default `2.0`) |
 | `RETIROS_DB_PATH` | Ruta de `retiros.json` (default: junto al codigo) |

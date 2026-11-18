@@ -98,6 +98,26 @@ EMBUDOS["nad"] = {
     "precio_frasco_desde_7": None,
     "regalo_desde": 2,
 }
+# --- Alternativas (si un producto se agota o deja de verse en Dropi) ---
+# Al crear el pedido se usa la PRIMERA opcion con stock; si no, la siguiente.
+# Drenaje 4 frascos = $38 (pedido 8020687, 18/11/2026: X3 $21 + X1 $9 + Batana $8).
+DRENAJE_2X1 = (186883, "Promocion Drenaje Linfatico 30ml 2x1")   # 2 frascos
+DRENAJE_X3 = (196169, "Drenaje Linfatico 30ml x3 unidades")      # 3 frascos
+DRENAJE_X1 = (193483, "Drenaje Linfatico 30ml")                  # 1 frasco
+_BATANA_REGALO = (BATANA["id"], BATANA["nombre"] + " (regalo)")
+
+EMBUDOS["drenaje"]["alternativas"] = {
+    2: [
+        [_it(*DRENAJE_2X1, 27.99)],
+        [_it(*DRENAJE_X1, 14.00, 2)],                                     # $28.00
+    ],
+    4: [
+        [_it(*DRENAJE_X3, 21.00), _it(*DRENAJE_X1, 9.00), _it(*_BATANA_REGALO, 8.00)],
+        [_it(*DRENAJE_2X1, 15.00, 2), _it(*_BATANA_REGALO, 8.00)],
+        [_it(*DRENAJE_X1, 7.50, 4), _it(*_BATANA_REGALO, 8.00)],
+    ],
+}
+
 for _e in EMBUDOS.values():
     if "combos" in _e:  # el total de cada combo es su precio
         _e["precios"] = {n: round(sum(x["price"] * x["quantity"] for x in c), 2)
@@ -116,13 +136,13 @@ SUELTOS = {
 BUSQUEDA_STOCK = {
     14235: "Mega Red 3",
     148700: "MEGA RED PRIV",
-    186883: "PROMOCION DRENAJE",
+    186883: ("PROMOCION DRENAJE", 15819),
     86248: "ACEITE BATANA OIL",
     111484: "TURKESTERONE",
     204734: "AURELYS 35ML",
     120461: "Her loss",
-    196169: "DRENAJE LINFATICO 30ML X3",
-    193483: "DRENAJE LINFATICO 30 ML",
+    196169: ("DRENAJE LINFATICO 30ML X3", 15819),
+    193483: ("DRENAJE LINFATICO 30 ML", 15819),
     202300: "Drenaje Linfatico x2",
     # NAD y su Candela son del proveedor 15819; con el proveedor la busqueda
     # no se pierde entre los otros "NAD"/"CANDELA" del catalogo.
@@ -201,9 +221,25 @@ def _a_int(valor):
 
 # ------------------------------------------------------------ claves --
 
+def _sin_opcion(clave):
+    """'drenaje:4#1' -> ('drenaje:4', 1). La opcion elige una alternativa."""
+    base, _, op = str(clave).partition("#")
+    return base, int(op) if op.isdigit() else 0
+
+
+def opciones(clave):
+    """Claves de todas las alternativas de armado, en orden de preferencia."""
+    base = _sin_opcion(clave)[0]
+    if base in SUELTOS:
+        return [base]
+    emb, frascos, _ = _partes(base)
+    n = len(EMBUDOS.get(emb, {}).get("alternativas", {}).get(frascos, []))
+    return [f"{base}#{i}" for i in range(n)] if n > 1 else [base]
+
+
 def _partes(clave):
     """'megared:2+batana' -> ('megared', 2, True)."""
-    base, _, extra = str(clave).partition("+")
+    base, _, extra = _sin_opcion(clave)[0].partition("+")
     emb, _, n = base.partition(":")
     return emb, int(n) if n.isdigit() else 0, extra == "batana"
 
@@ -213,7 +249,7 @@ def _clave(embudo, frascos, batana=False):
 
 
 def valida(clave):
-    if clave in SUELTOS:
+    if _sin_opcion(clave)[0] in SUELTOS:
         return True
     emb, n, _ = _partes(clave)
     return emb in EMBUDOS and n > 0 and _total_escalera(emb, n) is not None
@@ -229,6 +265,7 @@ def _total_escalera(embudo, frascos):
 
 
 def familia(clave):
+    clave = _sin_opcion(clave)[0]
     if clave in SUELTOS:
         return "drenaje" if clave == "aurelys" else clave
     return _partes(clave)[0]
@@ -238,6 +275,7 @@ def familia(clave):
 
 def armar(clave):
     """Lista de items {id, nombre, price, quantity} para Dropi."""
+    clave, opcion = _sin_opcion(clave)
     if clave in SUELTOS:
         s = SUELTOS[clave]
         return [{"id": s["id"], "nombre": s["nombre"], "price": s["precio"], "quantity": 1}]
@@ -246,6 +284,13 @@ def armar(clave):
     e = EMBUDOS[emb]
     if frascos in e.get("combos", {}):
         items = copy.deepcopy(e["combos"][frascos])
+        if batana:
+            items.append({"id": BATANA["id"], "nombre": BATANA["nombre"],
+                          "price": PRECIO_BATANA_EXTRA, "quantity": 1})
+        return items
+    alternativas = e.get("alternativas", {}).get(frascos)
+    if alternativas:
+        items = copy.deepcopy(alternativas[min(opcion, len(alternativas) - 1)])
         if batana:
             items.append({"id": BATANA["id"], "nombre": BATANA["nombre"],
                           "price": PRECIO_BATANA_EXTRA, "quantity": 1})
@@ -274,7 +319,7 @@ def armar(clave):
 
 def tiene_regalo(clave):
     """True si la venta lleva regalo sorpresa (promo de la semana)."""
-    if clave in SUELTOS:
+    if _sin_opcion(clave)[0] in SUELTOS:
         return False
     emb, frascos, _ = _partes(clave)
     return frascos >= EMBUDOS[emb]["regalo_desde"]
@@ -290,8 +335,8 @@ def productos_dropi(clave):
 
 
 def descripcion(clave):
-    if clave in SUELTOS:
-        titulo = SUELTOS[clave]["nombre"]
+    if _sin_opcion(clave)[0] in SUELTOS:
+        titulo = SUELTOS[_sin_opcion(clave)[0]]["nombre"]
     else:
         emb, frascos, batana = _partes(clave)
         titulo = f"{EMBUDOS[emb]['nombre']} — {frascos} frasco{'s' if frascos > 1 else ''}"

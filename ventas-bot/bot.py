@@ -47,6 +47,7 @@ Variables de entorno:
 import os
 import re
 import json
+import random
 import time
 import html
 import threading
@@ -69,6 +70,7 @@ import meta
 import asistente
 import transcribir
 import datos
+import tienda
 
 try:
     import dropi
@@ -291,6 +293,9 @@ def manejar_callback(cb):
         return
 
     try:
+        if accion in ("tc", "tk", "tv", "tx", "ty"):
+            _callback_tienda(cb_id, chat_id, message_id, accion, ns)
+            return
         if accion in ("wa", "wx"):
             _callback_borrador(cb_id, chat_id, message_id, accion, ns)
             return
@@ -387,6 +392,113 @@ def manejar_callback(cb):
     except Exception as e:
         print("Error en callback:", e)
         responder_callback(cb_id, f"Error: {e}", True)
+
+
+# ------------------------------------------------- pedidos de la tienda web --
+
+TIENDA_INTERVALO = int(os.environ.get("TIENDA_CHECK_SECONDS", "60"))
+_ultimo_tienda = 0.0
+_tienda_corriendo = threading.Event()
+
+
+def _revisar_tienda():
+    """Manda a Telegram la ficha de cada pedido nuevo de la tienda web."""
+    try:
+        for p in tienda.revisar():
+            for chat_id in ALLOWED:
+                enviar_plano(chat_id, tienda.texto_ficha(p), tienda.teclado(p))
+    except Exception as e:
+        print("Error revisando la tienda:", e)
+    finally:
+        _tienda_corriendo.clear()
+
+
+def _tienda_en_hilo(chat_id, message_id, p, fn):
+    pid = str(p["id"])
+    if not tienda.ocupar(pid):
+        return False
+
+    def envoltura():
+        try:
+            fn(chat_id, message_id, p)
+        except dropi_mcp.AuthRequired:
+            _pedir_conexion_dropi(chat_id, "🔐 Dropi pide iniciar sesión para crear el pedido web.\n"
+                                           "Al conectar, vuelve a pulsar «Crear en Dropi».")
+            editar_plano(chat_id, message_id, tienda.texto_ficha(p), tienda.teclado(p))
+        except Exception as e:
+            print("Error con pedido web:", e)
+            editar_plano(chat_id, message_id,
+                         tienda.texto_ficha(p, f"❌ Error: {e}\nAntes de reintentar revisa en Dropi "
+                                               "que no se haya creado."), tienda.teclado(p))
+        finally:
+            tienda.liberar(pid)
+
+    threading.Thread(target=envoltura, daemon=True).start()
+    return True
+
+
+def _tienda_preparar(chat_id, message_id, p):
+    ok, msg = tienda.preparar(p)
+    if ok:
+        editar_plano(chat_id, message_id, tienda.texto_confirmacion(p), tienda.teclado_confirmacion(p))
+    else:
+        editar_plano(chat_id, message_id, tienda.texto_ficha(p, f"❌ No se puede crear: {msg}"),
+                     tienda.teclado(p))
+
+
+def _tienda_crear(chat_id, message_id, p):
+    res = tienda.crear(p)
+    if res["ok"]:
+        extra = f"✅ Pedido creado en Dropi: #{res['order_id']}"
+        if res.get("mensaje"):
+            extra += f"\n{res['mensaje']}"
+    else:
+        extra = f"❌ No se creó.\n{res['mensaje']}"
+    editar_plano(chat_id, message_id, tienda.texto_ficha(p, extra), tienda.teclado(p))
+
+
+def _callback_tienda(cb_id, chat_id, message_id, accion, pid):
+    p = tienda.pedido(pid)
+    if not p:
+        responder_callback(cb_id, "No tengo ese pedido en memoria (el bot se reinició). "
+                                  "Llegará de nuevo en la próxima revisión.", True)
+        return
+    if accion == "tc":
+        if p["estado"] != "tomado":
+            responder_callback(cb_id, f"Este pedido ya está {p['estado']}.", True)
+            return
+        responder_callback(cb_id, "Preparando el pedido...")
+        editar_plano(chat_id, message_id, tienda.texto_ficha(
+            p, "⏳ Ubicando ciudad en Dropi, revisando stock y cotizando Servientrega..."))
+        if not _tienda_en_hilo(chat_id, message_id, p, _tienda_preparar):
+            responder_callback(cb_id, "Ya se está procesando este pedido.", True)
+    elif accion == "tk":
+        if not p.get("preparado"):
+            responder_callback(cb_id, "La confirmación venció, pulsa Crear de nuevo.", True)
+            editar_plano(chat_id, message_id, tienda.texto_ficha(p), tienda.teclado(p))
+            return
+        responder_callback(cb_id, "Creando pedido en Dropi...")
+        editar_plano(chat_id, message_id, tienda.texto_confirmacion(p) + "\n\n⏳ Creando pedido en Dropi...")
+        if not _tienda_en_hilo(chat_id, message_id, p, _tienda_crear):
+            responder_callback(cb_id, "Ya se está creando este pedido.", True)
+    elif accion == "tv":
+        p["preparado"] = None
+        responder_callback(cb_id, "Listo")
+        editar_plano(chat_id, message_id, tienda.texto_ficha(p), tienda.teclado(p))
+    elif accion == "tx":
+        if p["estado"] != "tomado":
+            responder_callback(cb_id, f"Este pedido ya está {p['estado']}.", True)
+            return
+        responder_callback(cb_id, "")
+        editar_plano(chat_id, message_id, tienda.texto_ficha(p, "¿Cancelar este pedido web?"),
+                     tienda.teclado_cancelar(p))
+    elif accion == "ty":
+        try:
+            tienda.cancelar(p)
+            responder_callback(cb_id, "Pedido cancelado")
+        except tienda.TiendaError as e:
+            responder_callback(cb_id, str(e), True)
+        editar_plano(chat_id, message_id, tienda.texto_ficha(p), tienda.teclado(p))
 
 
 def _notificar_venta(campos):
@@ -1222,7 +1334,15 @@ NOTIFICADAS_PATH = os.environ.get(
 _ya_notificadas = {}
 # Ultima revision de cada suscriptor: {user_ns: (ts, last_interaction)}.
 _ultima_revision = {}
-_ultimo_check = 0
+# Tras un reinicio la cache esta vacia y la primera revision lee la ficha
+# (~60 KB) de cada cliente reciente. Si varios bots se reinician juntos eso es
+# una rafaga contra Chatea Pro, asi que:
+#   - la primera revision espera un tiempo al azar (ARRANQUE_ESPERA_MAX_SECONDS),
+#   - cada ficha leida de Chatea Pro (no de cache) va seguida de una pausa
+#     (VENTAS_SCAN_DELAY_SECONDS).
+ARRANQUE_ESPERA_MAX = int(os.environ.get("ARRANQUE_ESPERA_MAX_SECONDS", "90"))
+VENTAS_SCAN_DELAY = float(os.environ.get("VENTAS_SCAN_DELAY_SECONDS", "0.5"))
+_ultimo_check = time.time() - INTERVALO_CHECK + random.uniform(15, max(15, ARRANQUE_ESPERA_MAX))
 _primera_pasada = True
 
 # Cada cuantos segundos se vuelve a revisar a un suscriptor aun sin compra,
@@ -1295,11 +1415,16 @@ def revisar_ventas_nuevas():
         if not _primera_pasada and not escribio and (ahora - ts) < REVISAR_NUEVOS_INTERVALO:
             continue
         _ultima_revision[ns] = (ahora, interaccion)
+        cacheado = chateapro._CACHE.get(ns)
+        remoto = escribio or not cacheado or (ahora - cacheado["ts"]) >= chateapro.CACHE_TTL
         try:
             campos = chateapro.obtener_campos(ns, fresco=escribio)
         except Exception as e:
             print(f"Error obteniendo campos de {ns}: {e}")
             continue
+        finally:
+            if remoto and VENTAS_SCAN_DELAY > 0:
+                time.sleep(VENTAS_SCAN_DELAY)  # no saturar Chatea Pro
         # Registra la fecha de deteccion de guias en estado de retiro, para
         # calcular dias sin retirar de forma confiable en /seguimiento.
         chateapro.registrar_retiros(campos)
@@ -1534,7 +1659,7 @@ def main():
     if REPORTE_DIARIO:
         print(f"Reporte diario ACTIVO (envio a las {HORA_REPORTE} hora de Ecuador).")
 
-    global _ultimo_check, _ultimo_reporte_dia, _ultima_alerta_dia
+    global _ultimo_check, _ultimo_reporte_dia, _ultima_alerta_dia, _ultimo_tienda
     offset = None
     while True:
         # 1) Revisar mensajes entrantes (comandos) con timeout corto.
@@ -1582,6 +1707,13 @@ def main():
         if NOTIFICAR and (time.time() - _ultimo_check) >= INTERVALO_CHECK:
             _ultimo_check = time.time()
             revisar_ventas_nuevas()
+
+        # 2b) Pedidos de la tienda web (si TIENDA_URL y TIENDA_API_KEY estan configuradas).
+        if tienda.activo() and ALLOWED and (time.time() - _ultimo_tienda) >= TIENDA_INTERVALO \
+                and not _tienda_corriendo.is_set():
+            _ultimo_tienda = time.time()
+            _tienda_corriendo.set()
+            threading.Thread(target=_revisar_tienda, daemon=True).start()
 
         # 3) Alertas de Dropi (novedades + recordatorio de retiro), una vez al dia.
         if ALERTAS_DIARIAS and ALLOWED:
