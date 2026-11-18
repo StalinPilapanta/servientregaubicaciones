@@ -98,6 +98,22 @@ EMBUDOS["nad"] = {
     "precio_frasco_desde_7": None,
     "regalo_desde": 2,
 }
+
+# BioKids Moringa (gomitas para ninos). Precios de Chatea Pro (18/11/2026):
+# 1 frasco $24.99 · 2 frascos $34.99 + regalo. El regalo sube como Batana,
+# igual que NAD de 3 frascos. CONFIRMAR el armado con el vendedor.
+BIOKIDS = (118567, "BIOKIDS MORINGA")
+EMBUDOS["biokids"] = {
+    "nombre": "BioKids Moringa",
+    "ids_crm": (118567, 107177),
+    "palabras": ("biokids", "bio kids", "gomitas con moringa"),
+    "combos": {
+        1: [_it(*BIOKIDS, 24.99)],
+        2: [_it(*BIOKIDS, 13.00, 2), _it(BATANA["id"], BATANA["nombre"], 8.99)],
+    },
+    "precio_frasco_desde_7": None,
+    "regalo_desde": 2,
+}
 # --- Alternativas (si un producto se agota o deja de verse en Dropi) ---
 # Al crear el pedido se usa la PRIMERA opcion con stock; si no, la siguiente.
 # Drenaje 4 frascos = $38 (pedido 8020687, 18/11/2026: X3 $21 + X1 $9 + Batana $8).

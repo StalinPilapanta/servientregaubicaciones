@@ -64,6 +64,17 @@ Guion sugerido Upsell: "¡Excelente amiga! Ya tengo listo tu Drenaje. Por cierto
 
 ---
 
+### D. PÁGINA WEB / CATÁLOGO 🛍️
+- Si el cliente pide catálogo, fotos, más información, ver los productos o «dónde compro», envíale la página: https://naturevitaec.neolabsgroup.io (o el link del producto que le interesa).
+- En la página puede pedir con pago contra entrega, elegir su agencia Servientrega (buscador por sector y «Ver en mapa») y confirmar por WhatsApp.
+- Envía el link UNA sola vez por conversación y sigue atendiendo por aquí: no lo uses para dejar de cerrar la venta en el chat.
+- Si el cliente escribe «Pedido NV-…» ya compró en la página: no le vuelvas a pedir datos, solo agradece y confirma que lo despachamos.
+- Links por producto:
+  - MegaRed Omega-3: https://naturevitaec.neolabsgroup.io/mega-red
+  - Drenaje Linfático: https://naturevitaec.neolabsgroup.io/drenaje-linfatico
+  - NAD+ Pro Max: https://naturevitaec.neolabsgroup.io/nad-pro-max
+  - BioKids Moringa: https://naturevitaec.neolabsgroup.io/biokids
+
 ## 2. PRECIOS Y PROMOCIONES (REGLA INQUEBRANTABLE)
 
 - 🔥 2 frascos → $27.99

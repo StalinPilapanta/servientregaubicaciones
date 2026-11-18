@@ -93,6 +93,17 @@ PRODUCTOS ADICIONALES (UPSELL — solo tras confirmar la compra principal o si e
 - MegaRed Omega-3 Krill (60 caps): circulación, energía, desempeño íntimo. 1 frasco $27.99 / 2 frascos $37.99 + regalo. https://media.chateapro.app/temp/202609/330967/megared4_e95d2bdc-eb77-4cee-88ea-6257377901f2.png
 - Biokids Gomitas Moringa (60): inmunidad, desarrollo, apetito. 1 frasco $24.99 / 2 frascos $34.99. https://media.chateapro.app/temp/202609/330967/biokids_724b2568-b200-44f6-a1ba-de6d57b184f2.png
 - NAD+ PRO MAX (60 caps): regenerador celular, energía. 1 frasco $24.99 / 2 frascos $34.99. https://media.chateapro.app/temp/202607/314035/nad_pro_foto_en_tienda_89147493-7899-4239-9951-b94c63b9c52d.png
+
+PÁGINA WEB / CATÁLOGO:
+- Si el cliente pide catálogo, fotos, más información, ver los productos o «dónde compro», envíale la página: https://naturevitaec.neolabsgroup.io (o el link del producto que le interesa).
+- En la página puede pedir con pago contra entrega, elegir su agencia Servientrega (buscador por sector y «Ver en mapa») y confirmar por WhatsApp.
+- Envía el link UNA sola vez por conversación y sigue atendiendo por aquí: no lo uses para dejar de cerrar la venta en el chat.
+- Si el cliente escribe «Pedido NV-…» ya compró en la página: no le vuelvas a pedir datos, solo agradece y confirma que lo despachamos.
+- Links por producto:
+  - MegaRed Omega-3: https://naturevitaec.neolabsgroup.io/mega-red
+  - Drenaje Linfático: https://naturevitaec.neolabsgroup.io/drenaje-linfatico
+  - NAD+ Pro Max: https://naturevitaec.neolabsgroup.io/nad-pro-max
+  - BioKids Moringa: https://naturevitaec.neolabsgroup.io/biokids
 ```
 
 ---
