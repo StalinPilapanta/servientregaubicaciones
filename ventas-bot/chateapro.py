@@ -141,6 +141,90 @@ def obtener_campos(user_ns, fresco=False):
     return campos
 
 
+# --- Configuracion de promos desde los campos del bot ---
+# Cada embudo de ventas es un campo del bot "[Producto Ventas Wp] N" con
+# informacion_de_producto.id_dropi y upsells.1 (que usamos como regalo).
+# Las reglas de armado van en el campo del bot "[Promos Dropi] Reglas" (JSON).
+CAMPO_BOT_EMBUDO = "[Producto Ventas Wp]"
+CAMPO_BOT_REGLAS = "[Promos Dropi] Reglas"
+_CONFIG_PROMOS = {"ts": 0, "valor": None}
+CONFIG_PROMOS_TTL = int(os.environ.get("CONFIG_PROMOS_TTL_SECONDS", "600"))
+RUTA_REGLAS_LOCALES = os.environ.get("PROMOS_REGLAS_PATH") or datos.ruta("reglas_promos.json")
+
+
+def _json_o_dict(valor):
+    if isinstance(valor, (dict, list)):
+        return valor
+    try:
+        return json.loads(valor or "")
+    except (TypeError, ValueError):
+        return None
+
+
+def listar_campos_bot():
+    """Todos los campos del bot {nombre: valor} (paginando de a 100)."""
+    campos = {}
+    for page in range(1, 11):
+        data = _get("/flow/bot-fields", {"limit": 100, "page": page})
+        for f in data.get("data", []):
+            campos[f.get("name", "")] = f.get("value")
+        meta = data.get("meta") or {}
+        if page >= (meta.get("last_page") or 1):
+            break
+    return campos
+
+
+def _num(valor):
+    try:
+        return float(str(valor).replace(",", "."))
+    except (TypeError, ValueError):
+        return None
+
+
+def config_promos(fresco=False):
+    """
+    {"embudos": {id_dropi: {nombre, precio, regalo}}, "reglas": {id_dropi: {...}}}
+    leido de los campos del bot (con cache). regalo = upsells.1 si tiene id_dropi.
+    """
+    ahora = time.time()
+    if not fresco and _CONFIG_PROMOS["valor"] and ahora - _CONFIG_PROMOS["ts"] < CONFIG_PROMOS_TTL:
+        return _CONFIG_PROMOS["valor"]
+    campos = listar_campos_bot()
+    embudos = {}
+    for nombre, valor in campos.items():
+        if not nombre.startswith(CAMPO_BOT_EMBUDO):
+            continue
+        cfg = _json_o_dict(valor) or {}
+        info = cfg.get("informacion_de_producto") or {}
+        id_dropi = str(info.get("id_dropi") or "").strip()
+        if not id_dropi.isdigit() or str(info.get("estado", "activo")).lower() != "activo":
+            continue
+        up = (cfg.get("upsells") or {}).get("1") or {}
+        regalo = None
+        if str(up.get("id_dropi") or "").strip().isdigit():
+            regalo = {"id": int(up["id_dropi"]), "nombre": up.get("nombre") or f"#{up['id_dropi']}",
+                      "precio": _num(up.get("precio")) or 0.0}
+        embudos[int(id_dropi)] = {"nombre": info.get("nombre") or f"#{id_dropi}",
+                                  "precio": _num(info.get("precio")), "regalo": regalo,
+                                  "campo": nombre}
+    # Reglas: campo del bot y/o archivo local (para cuentas cuyo Chatea Pro
+    # no podemos editar). El archivo gana si ambos traen el mismo embudo.
+    reglas = {}
+    fuentes = [_json_o_dict(campos.get(CAMPO_BOT_REGLAS)) or {}]
+    try:
+        with open(RUTA_REGLAS_LOCALES, encoding="utf-8") as f:
+            fuentes.append(json.load(f))
+    except (OSError, ValueError):
+        pass
+    for fuente in fuentes:
+        for k, v in fuente.items():
+            if str(k).strip().isdigit() and isinstance(v, dict):
+                reglas[int(k)] = v
+    valor = {"embudos": embudos, "reglas": reglas}
+    _CONFIG_PROMOS.update(ts=ahora, valor=valor)
+    return valor
+
+
 def _parse_fecha_compra(valor):
     """
     Convierte 'Fecha de compra' (ej '13/09/2026 10:16 pm') a date, o None.

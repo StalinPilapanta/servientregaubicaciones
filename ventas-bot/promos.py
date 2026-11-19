@@ -245,6 +245,12 @@ def _sin_opcion(clave):
 
 def opciones(clave):
     """Claves de todas las alternativas de armado, en orden de preferencia."""
+    if es_auto(clave):
+        return [clave]
+    if es_hist(clave):
+        base, p = clave.partition("#")[0], _partes_hist(clave)
+        n = len(_armados_hist(*p[:3])) if p else 0
+        return [f"{base}#{i}" for i in range(n)] if n > 1 else [base]
     base = _sin_opcion(clave)[0]
     if base in SUELTOS:
         return [base]
@@ -265,6 +271,10 @@ def _clave(embudo, frascos, batana=False):
 
 
 def valida(clave):
+    if es_auto(clave):
+        return _armar_auto(clave) is not None
+    if es_hist(clave):
+        return _armar_hist(clave) is not None
     if _sin_opcion(clave)[0] in SUELTOS:
         return True
     emb, n, _ = _partes(clave)
@@ -281,6 +291,9 @@ def _total_escalera(embudo, frascos):
 
 
 def familia(clave):
+    if es_auto(clave) or es_hist(clave):
+        emb_id = (_partes_auto(clave) if es_auto(clave) else _partes_hist(clave))[0]
+        return _embudo_por_id(emb_id) or f"auto{emb_id}"
     clave = _sin_opcion(clave)[0]
     if clave in SUELTOS:
         return "drenaje" if clave == "aurelys" else clave
@@ -291,6 +304,16 @@ def familia(clave):
 
 def armar(clave):
     """Lista de items {id, nombre, price, quantity} para Dropi."""
+    if es_auto(clave):
+        items = _armar_auto(clave)
+        if items is None:
+            raise ValueError(f"Promo {clave} no se puede armar (revisa [Promos Dropi] Reglas).")
+        return items
+    if es_hist(clave):
+        items = _armar_hist(clave)
+        if items is None:
+            raise ValueError(f"Promo {clave} ya no esta en el historial de la cuenta.")
+        return items
     clave, opcion = _sin_opcion(clave)
     if clave in SUELTOS:
         s = SUELTOS[clave]
@@ -335,6 +358,8 @@ def armar(clave):
 
 def tiene_regalo(clave):
     """True si la venta lleva regalo sorpresa (promo de la semana)."""
+    if es_auto(clave) or es_hist(clave):
+        return any(x["nombre"].endswith("(regalo)") for x in armar(clave))
     if _sin_opcion(clave)[0] in SUELTOS:
         return False
     emb, frascos, _ = _partes(clave)
@@ -351,7 +376,16 @@ def productos_dropi(clave):
 
 
 def descripcion(clave):
-    if _sin_opcion(clave)[0] in SUELTOS:
+    if es_auto(clave):
+        emb_id, frascos, _ = _partes_auto(clave)
+        r = _regla(emb_id)
+        titulo = f"{r['nombre'] if r else emb_id} — {frascos} frasco{'s' if frascos > 1 else ''}"
+    elif es_hist(clave):
+        emb_id, frascos, _, _ = _partes_hist(clave)
+        nombre = (EMBUDOS.get(_embudo_por_id(emb_id) or "", {}).get("nombre")
+                  or _nombre_producto(emb_id))
+        titulo = f"{nombre} — {frascos} frasco{'s' if frascos > 1 else ''}"
+    elif _sin_opcion(clave)[0] in SUELTOS:
         titulo = SUELTOS[_sin_opcion(clave)[0]]["nombre"]
     else:
         emb, frascos, batana = _partes(clave)
@@ -487,6 +521,268 @@ def aviso_valor(clave, valor_compra):
     if valor is None or abs(valor - total_promo(clave)) < 0.005:
         return ""
     return f"El CRM dice ${valor:.2f} y en Dropi se sube ${total_promo(clave):.2f}."
+
+
+# ------------------------------------------------- promo automatica --
+#
+# Para que una cuenta nueva no tenga que escribir combos aqui, la promo se
+# arma con los campos de Chatea Pro:
+#
+#   ID de Dropi x Cantidad de productos, total = Valor de la compra
+#   + regalo (upsells.1 del embudo "[Producto Ventas Wp] N")
+#
+# Solo aplica a los embudos que tienen entrada en el campo del bot
+# "[Promos Dropi] Reglas" (JSON). Ejemplo (VitashopEc):
+#   {"148700": {"producto_por_frascos": {"1": {"id": 14235, "nombre": "Mega Red 3"}},
+#               "regalo_desde": 2},
+#    "186883": {"frascos_por_unidad": 2, "regalo_desde": 4}}
+# Claves (todas opcionales):
+#   frascos_por_unidad   frascos que trae 1 unidad de Dropi (2x1 = 2). Def. 1
+#   producto_por_frascos {frascos: id o {id, nombre}} producto distinto segun cantidad
+#   regalo_desde         frascos desde los que va el regalo. Def. 2
+#   regalo               {id, nombre, precio} en vez de upsells.1; null = sin regalo
+#   max_frascos          mas frascos que esto -> aviso "revisa el armado"
+# Clave de la promo: "auto:<id embudo>:<frascos>:<valor en centavos>".
+
+_CONFIG = {"valor": None}
+_VACIO = {"embudos": {}, "reglas": {}}
+
+
+def usar_config(cfg):
+    """Fija la configuracion (pruebas / simulacion) en vez de leer Chatea Pro."""
+    _CONFIG["valor"] = cfg
+    _registrar_busquedas(cfg)
+
+
+def _config():
+    if _CONFIG["valor"] is not None:
+        return _CONFIG["valor"]
+    try:
+        import chateapro  # tarde: promos se usa tambien sin API
+        cfg = chateapro.config_promos()
+    except Exception as e:  # sin config -> solo reglas del codigo
+        print(f"promos: no pude leer la config de Chatea Pro: {e}")
+        return _VACIO
+    _registrar_busquedas(cfg)
+    return cfg
+
+
+def _producto_ref(valor, defecto):
+    if isinstance(valor, dict) and str(valor.get("id", "")).isdigit():
+        return int(valor["id"]), valor.get("nombre") or f"#{valor['id']}"
+    if str(valor or "").isdigit():
+        return int(valor), f"#{valor}"
+    return defecto
+
+
+def _regla(emb_id, cfg=None):
+    """Regla completa del embudo o None si no esta activado en Chatea Pro."""
+    cfg = cfg or _config()
+    if emb_id not in cfg["reglas"] or emb_id not in cfg["embudos"]:
+        return None
+    e, r = cfg["embudos"][emb_id], cfg["reglas"][emb_id]
+    regalo = r["regalo"] if "regalo" in r else e.get("regalo")
+    if isinstance(regalo, dict) and str(regalo.get("id", "")).isdigit():
+        regalo = {"id": int(regalo["id"]), "nombre": regalo.get("nombre") or f"#{regalo['id']}",
+                  "precio": float(regalo.get("precio") or 0)}
+    else:
+        regalo = None
+    return {
+        "nombre": e["nombre"],
+        "precio": e.get("precio"),
+        "frascos_por_unidad": max(1, int(r.get("frascos_por_unidad") or 1)),
+        "producto_por_frascos": {int(k): v for k, v in (r.get("producto_por_frascos") or {}).items()
+                                 if str(k).isdigit()},
+        "regalo": regalo,
+        "regalo_desde": int(r.get("regalo_desde") or 2),
+        "max_frascos": int(r["max_frascos"]) if str(r.get("max_frascos", "")).isdigit() else None,
+    }
+
+
+def _registrar_busquedas(cfg):
+    """Nombres de los productos de Chatea Pro para revisar stock en Dropi."""
+    for emb_id, e in cfg.get("embudos", {}).items():
+        BUSQUEDA_STOCK.setdefault(emb_id, e["nombre"])
+        if e.get("regalo"):
+            BUSQUEDA_STOCK.setdefault(e["regalo"]["id"], e["regalo"]["nombre"])
+    for r in cfg.get("reglas", {}).values():
+        for v in (r.get("producto_por_frascos") or {}).values():
+            pid, nombre = _producto_ref(v, (None, None))
+            if pid and not nombre.startswith("#"):
+                BUSQUEDA_STOCK.setdefault(pid, nombre)
+        reg = r.get("regalo")
+        if isinstance(reg, dict) and str(reg.get("id", "")).isdigit() and reg.get("nombre"):
+            BUSQUEDA_STOCK.setdefault(int(reg["id"]), reg["nombre"])
+
+
+def es_auto(clave):
+    return str(clave or "").startswith("auto:")
+
+
+def _partes_auto(clave):
+    """'auto:148700:2:3800' -> (148700, 2, 38.0) o None."""
+    p = str(clave).split(":")
+    if len(p) != 4 or not all(x.isdigit() for x in p[1:]):
+        return None
+    return int(p[1]), int(p[2]), int(p[3]) / 100
+
+
+def _armar_auto(clave, cfg=None):
+    """Items para Dropi o None si la clave no se puede armar."""
+    partes = _partes_auto(clave)
+    if not partes:
+        return None
+    emb_id, frascos, valor = partes
+    r = _regla(emb_id, cfg)
+    if not r or frascos <= 0 or valor <= 0 or frascos % r["frascos_por_unidad"]:
+        return None
+    unidades = frascos // r["frascos_por_unidad"]
+    pid, nombre = _producto_ref(r["producto_por_frascos"].get(frascos), (emb_id, r["nombre"]))
+    regalo = r["regalo"] if r["regalo"] and frascos >= r["regalo_desde"] else None
+    resto = round(valor - (regalo["precio"] if regalo else 0), 2)
+    if resto <= 0:
+        return None
+    precio_u = round(resto / unidades, 2)
+    items = [{"id": pid, "nombre": nombre, "price": precio_u, "quantity": unidades}]
+    if regalo:
+        # El regalo absorbe los centavos del redondeo para que el total cuadre.
+        items.append({"id": regalo["id"], "nombre": regalo["nombre"] + " (regalo)",
+                      "price": round(valor - precio_u * unidades, 2), "quantity": 1})
+    return items
+
+
+def detectar_auto(campos):
+    """
+    Promo automatica desde el CRM. (clave|None, origen, avisos).
+    clave None y sin avisos = el embudo no esta activado en Chatea Pro.
+    """
+    emb_id = _a_int(campos.get("ID de Dropi"))
+    r = _regla(emb_id) if emb_id else None
+    if not r:
+        return None, "", []
+    avisos = []
+    frascos = _a_int(campos.get("Cantidad de productos"))
+    valor = _a_float(campos.get("Valor de la compra"))
+    if not frascos:
+        return None, "", [f"{r['nombre']}: la cantidad de productos está vacía en el CRM."]
+    if not valor:
+        return None, "", [f"{r['nombre']}: el valor de la compra está vacío en el CRM."]
+    if r["precio"] and valor > r["precio"] * frascos * 1.5 + 1:
+        return None, "", [f"⚠️ {r['nombre']}: ${valor:g} por {frascos} frasco(s) no tiene sentido "
+                          "(¿falta el punto decimal?). Revisa el valor en el CRM."]
+    if frascos % r["frascos_por_unidad"]:
+        return None, "", [f"{r['nombre']}: {frascos} frascos no es múltiplo de "
+                          f"{r['frascos_por_unidad']} (cada unidad trae {r['frascos_por_unidad']})."]
+    clave = f"auto:{emb_id}:{frascos}:{int(round(valor * 100))}"
+    if not _armar_auto(clave):
+        return None, "", [f"{r['nombre']}: ${valor:.2f} no alcanza para el regalo; revisa el valor."]
+    if r["max_frascos"] and frascos > r["max_frascos"]:
+        avisos.append(f"Pedido grande ({frascos} frascos): revisa el armado antes de crear.")
+    fams = familias_en(campos.get("Productos escogidos", ""))
+    propia = _embudo_por_id(emb_id)
+    if fams and propia and propia not in fams:
+        avisos.append(f"⚠️ «{campos.get('Productos escogidos')}» no parece {r['nombre']}: revisa el chat.")
+    return clave, "Chatea Pro (ID de Dropi + cantidad + valor)", avisos
+
+
+# ------------------------------------------ promo aprendida (historial) --
+#
+# historial.py aprende de los pedidos que la cuenta ya subio a Dropi. Clave:
+# "hist:<id embudo>:<frascos>:<valor en centavos>[#n]"; #n = n-esimo armado
+# mas visto (las alternativas se prueban en orden hasta encontrar stock).
+
+REGALOS_CONOCIDOS = {BATANA["id"], TURKESTERONE["id"], 175317, 115343}  # + Candela, Te Chino
+
+
+def es_hist(clave):
+    return str(clave or "").startswith("hist:")
+
+
+def _partes_hist(clave):
+    """'hist:148700:2:3800#1' -> (148700, 2, 38.0, 1) o None."""
+    base, _, op = str(clave).partition("#")
+    p = _partes_auto("auto:" + base[len("hist:"):]) if es_hist(base) else None
+    return (*p, int(op) if op.isdigit() else 0) if p else None
+
+
+def _armados_hist(emb, frascos, valor):
+    import historial
+    return [(items, n) for items, n in historial.armados(emb, frascos, valor)
+            if n >= historial.MIN_VISTOS]
+
+
+def _nombre_producto(pid):
+    import historial
+    n = historial.nombre(pid)
+    if n:
+        BUSQUEDA_STOCK.setdefault(pid, n)  # para revisar stock en Dropi
+        return n
+    if pid in CATALOGO:
+        return CATALOGO[pid]["nombre"]
+    b = BUSQUEDA_STOCK.get(pid)
+    return b if isinstance(b, str) else f"#{pid}"
+
+
+def _armar_hist(clave):
+    partes = _partes_hist(clave)
+    if not partes:
+        return None
+    emb, frascos, valor, op = partes
+    arm = _armados_hist(emb, frascos, valor)
+    if not arm:
+        return None
+    items, _ = arm[min(op, len(arm) - 1)]
+    items = sorted(items, key=lambda x: (x[0] in REGALOS_CONOCIDOS, x[0] != emb))  # producto, luego regalo
+    return [{"id": i, "nombre": _nombre_producto(i) + (" (regalo)" if i in REGALOS_CONOCIDOS else ""),
+             "price": p, "quantity": q} for i, q, p in items]
+
+
+def detectar_hist(campos):
+    """Promo con lo que esta cuenta ya hizo en Dropi. (clave|None, origen, avisos)."""
+    emb = _a_int(campos.get("ID de Dropi"))
+    frascos = _a_int(campos.get("Cantidad de productos"))
+    valor = _a_float(campos.get("Valor de la compra"))
+    if not (emb and frascos and valor):
+        return None, "", []
+    arm = _armados_hist(emb, frascos, valor)
+    if not arm:
+        return None, "", []
+    clave = f"hist:{emb}:{frascos}:{int(round(valor * 100))}"
+    avisos = []
+    if len(arm) > 1:
+        avisos.append(f"Esta cuenta lo armó de {len(arm)} formas; se usa la más frecuente "
+                      "que tenga stock.")
+    total = round(sum(p * q for _, q, p in arm[0][0]), 2)
+    if abs(total - valor) > 0.02:
+        avisos.append(f"El CRM dice ${valor:.2f}; en Dropi se sube ${total:.2f} (como siempre).")
+    fams = familias_en(campos.get("Productos escogidos", ""))
+    propia = _embudo_por_id(emb)
+    if fams and propia and propia not in fams:
+        avisos.append(f"⚠️ «{campos.get('Productos escogidos')}» no parece el producto del "
+                      "embudo: revisa el chat.")
+    return clave, f"historial de la cuenta (visto {arm[0][1]}x)", avisos
+
+
+def detectar_promo_venta(campos, texto_chat=""):
+    """
+    Lo que usa la ficha, en este orden:
+      1. lo aprendido del historial de la cuenta (historial.py)
+      2. la regla automatica si el embudo tiene [Promos Dropi] Reglas
+      3. las reglas de este archivo (detectar)
+    """
+    try:
+        clave, origen, avisos = detectar_hist(campos)
+    except Exception as e:  # el historial es un extra: nunca bloquea la ficha
+        print(f"promos: historial no disponible: {e}")
+        clave, origen, avisos = None, "", []
+    if clave:
+        return clave, origen, avisos
+    clave, origen, avisos = detectar_auto(campos)
+    if clave or avisos:
+        # Embudo activado: si los datos no sirven, se revisa a mano (sin
+        # caer a las reglas del codigo, que pueden ser de otra cuenta).
+        return clave, origen, avisos
+    return detectar(campos, texto_chat)
 
 
 # ---------------------------------------------------------------- IA --
