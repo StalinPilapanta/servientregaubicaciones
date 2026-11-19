@@ -2,9 +2,10 @@
 Cliente minimo del MCP oficial de Dropi (https://mcp.dropi.co/mcp) con OAuth.
 
 El MCP usa OAuth 2.1 estandar (verificado en sus /.well-known):
-  - registro dinamico de cliente  POST https://integrations.dropi.co/oauth/register
-  - autorizacion (login del user) GET  https://oauth.dropi.co/oauth/authorize
-  - token / refresh               POST https://integrations.dropi.co/oauth/token
+  - registro dinamico de cliente  POST https://mcp.dropi.co/oauth/register
+  - autorizacion (login del user) GET  https://mcp.dropi.co/login/authorize
+  - token / refresh               POST https://mcp.dropi.co/oauth/token
+  (se descubren solos por /.well-known; antes eran oauth.dropi.co e integrations.dropi.co)
   - cliente publico + PKCE (S256), sin client_secret
 
 Flujo desde Telegram:
@@ -108,36 +109,43 @@ def _well_known_resource():
     return f"{u.scheme}://{u.netloc}/.well-known/oauth-protected-resource{u.path}"
 
 
-def _metadata():
+def _metadata(fresca=False):
+    """Metadata del servidor de autorizacion. Se re-descubre cada hora (o si
+    fresca=True): Dropi ya movio su OAuth una vez (oauth.dropi.co -> mcp.dropi.co)."""
     global _meta
-    if _meta:
+    if _meta and not fresca and time.time() - _meta.get("_ts", 0) < 3600:
         return _meta
     r = requests.get(_well_known_resource(), timeout=15)
     r.raise_for_status()
-    servidor = r.json()["authorization_servers"][0].rstrip("/")
+    prm = r.json()
+    servidor = prm["authorization_servers"][0].rstrip("/")
     r = requests.get(servidor + "/.well-known/oauth-authorization-server", timeout=15)
     r.raise_for_status()
-    _meta = r.json()
+    _meta = dict(r.json(), _ts=time.time(),
+                 _scope=" ".join(prm.get("scopes_supported") or ["mcp"]))
     return _meta
 
 
 def _cliente():
     """client_id registrado (registro dinamico, una vez por redirect_uri)."""
     d = _leer()
-    if d.get("client_id") and d.get("redirect_uri") == REDIRECT_URI:
+    meta = _metadata()
+    if (d.get("client_id") and d.get("redirect_uri") == REDIRECT_URI
+            and d.get("registro") == meta["registration_endpoint"]):
         return d["client_id"]
-    r = requests.post(_metadata()["registration_endpoint"], json={
+    r = requests.post(meta["registration_endpoint"], json={
         "client_name": CLIENT_NAME,
         "redirect_uris": [REDIRECT_URI],
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
         "token_endpoint_auth_method": "none",
-        "scope": "mcp",
+        "scope": meta["_scope"],
     }, timeout=20)
     if r.status_code >= 400:
         raise MCPError(f"Registro OAuth en Dropi fallo (HTTP {r.status_code}): {r.text[:200]}")
     client_id = r.json()["client_id"]
-    d.update({"client_id": client_id, "redirect_uri": REDIRECT_URI})
+    d.update({"client_id": client_id, "redirect_uri": REDIRECT_URI,
+              "registro": meta["registration_endpoint"]})
     _guardar(d)
     return client_id
 
@@ -153,17 +161,18 @@ def url_autorizacion():
         for s in [s for s, v in _pendientes.items() if ahora - v["ts"] > 900]:
             _pendientes.pop(s, None)
         _pendientes[state] = {"verifier": verifier, "ts": ahora}
+        meta = _metadata(fresca=True)
         params = {
             "response_type": "code",
             "client_id": _cliente(),
             "redirect_uri": REDIRECT_URI,
-            "scope": "mcp",
+            "scope": meta["_scope"],
             "state": state,
             "code_challenge": challenge,
             "code_challenge_method": "S256",
             "resource": MCP_URL,
         }
-        return _metadata()["authorization_endpoint"] + "?" + urlencode(params)
+        return meta["authorization_endpoint"] + "?" + urlencode(params)
 
 
 def es_url_callback(texto):
