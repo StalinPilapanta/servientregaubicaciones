@@ -71,6 +71,7 @@ import asistente
 import transcribir
 import datos
 import tienda
+import historial
 
 try:
     import dropi
@@ -420,6 +421,23 @@ def _revisar_tienda():
         _tienda_corriendo.clear()
 
 
+# ------------------------------------------------- historial de promos --
+
+# La primera revision espera 2 min tras arrancar; despues historial.refrescar
+# solo barre Chatea Pro si pasaron HISTORIAL_REFRESCO_HORAS.
+_ultimo_historial = time.time() - 600 + 120
+_historial_corriendo = threading.Event()
+
+
+def _refrescar_historial():
+    try:
+        historial.refrescar()
+    except Exception as e:
+        print("Error actualizando el historial de promos:", e)
+    finally:
+        _historial_corriendo.clear()
+
+
 def _tienda_en_hilo(chat_id, message_id, p, fn):
     pid = str(p["id"])
     if not tienda.ocupar(pid):
@@ -638,6 +656,7 @@ def manejar_comando(chat_id, texto):
                "• /ventas — lista de pedidos\n"
                "• /ventas dd/mm/aaaa — pedidos por fecha\n"
                "• /crear_pedido <teléfono> — ficha de la venta (promo + agencia) con botón para crear en Dropi\n"
+               "• /promos_aprendidas [actualizar] — promos que el bot aprendió del historial de la cuenta\n"
                "• /en_agencia — reporte HTML de pedidos en agencia Servientrega "
                "(Dropi MCP) con botón de WhatsApp\n"
                "• /dropi_conectar — iniciar sesión en Dropi (MCP)\n"
@@ -661,6 +680,25 @@ def manejar_comando(chat_id, texto):
     if cmd == "/dropi_desconectar":
         dropi_mcp.desconectar()
         enviar_plano(chat_id, "Dropi (MCP) desconectado. Usa /dropi_conectar para volver a entrar.")
+        return
+
+    if cmd == "/promos_aprendidas":
+        # /promos_aprendidas            -> tabla aprendida del historial
+        # /promos_aprendidas actualizar -> vuelve a barrer Chatea Pro antes
+        forzar = "actualizar" in texto.lower()
+
+        def _promos():
+            try:
+                if forzar:
+                    enviar_plano(chat_id, "⏳ Leyendo el historial de ventas en Chatea Pro...")
+                    historial.refrescar(forzar=True)
+                txt = historial.resumen()
+                for i in range(0, len(txt), 3800):
+                    enviar_plano(chat_id, txt[i:i + 3800])
+            except Exception as e:
+                enviar_plano(chat_id, f"❌ No pude leer el historial: {e}")
+
+        threading.Thread(target=_promos, daemon=True).start()
         return
 
     if cmd == "/resumen":
@@ -1216,6 +1254,7 @@ MENU_COMANDOS = [
     ("resumen", "Ventas de hoy"),
     ("ventas", "Lista de pedidos de hoy"),
     ("crear_pedido", "Ficha y crear pedido: /crear_pedido <teléfono>"),
+    ("promos_aprendidas", "Promos aprendidas del historial de la cuenta"),
     ("reporte_diario", "Reporte completo del día"),
     ("guia", "Estado de una guía: /guia <número>"),
     ("dropi_pedidos", "Pedidos de Dropi (MCP) + HTML"),
@@ -1666,7 +1705,7 @@ def main():
     if REPORTE_DIARIO:
         print(f"Reporte diario ACTIVO (envio a las {HORA_REPORTE} hora de Ecuador).")
 
-    global _ultimo_check, _ultimo_reporte_dia, _ultima_alerta_dia, _ultimo_tienda
+    global _ultimo_check, _ultimo_reporte_dia, _ultima_alerta_dia, _ultimo_tienda, _ultimo_historial
     offset = None
     while True:
         # 1) Revisar mensajes entrantes (comandos) con timeout corto.
@@ -1721,6 +1760,12 @@ def main():
             _ultimo_tienda = time.time()
             _tienda_corriendo.set()
             threading.Thread(target=_revisar_tienda, daemon=True).start()
+
+        # 2c) Historial de promos: re-aprende de Chatea Pro cada HISTORIAL_REFRESCO_HORAS.
+        if (time.time() - _ultimo_historial) >= 600 and not _historial_corriendo.is_set():
+            _ultimo_historial = time.time()
+            _historial_corriendo.set()
+            threading.Thread(target=_refrescar_historial, daemon=True).start()
 
         # 3) Alertas de Dropi (novedades + recordatorio de retiro), una vez al dia.
         if ALERTAS_DIARIAS and ALLOWED:

@@ -205,6 +205,44 @@ Dropi** (misma sesión OAuth de `/dropi_conectar`), sin Hermes:
    Dropi se sube por cantidad se configura en `EMBUDOS`. Ej:
    Mega Red 1 → Mega Red 3 (14235) $27.99 · Mega Red 2 → 2× 148700 $15 + Batana $8 ·
    Drenaje 2 → 186883 $27.99 · Drenaje 4 → 2× 186883 $15 + Batana $8.
+
+   **Orden en que se decide la promo:** (1) lo aprendido del historial de la
+   cuenta, (2) la regla automática, (3) `EMBUDOS` de este archivo. Si nada
+   encaja, la ficha lo pide revisar. Siempre se confirma con el botón.
+
+   **Promos aprendidas del historial (`historial.py`, sin configurar nada).**
+   Cada venta que ya pasó a Dropi deja en Chatea Pro lo vendido (`ID de
+   Dropi`, `Cantidad de productos`, `Valor de la compra`) y lo subido
+   (`[Logistica] JSON products para Fletes`). El bot arma con eso la tabla
+   (embudo, frascos, valor ±$0.15) → armados vistos y la usa cuando una
+   combinación se vio al menos `HISTORIAL_MIN_VISTOS` veces (def. 2). Si hay
+   varios armados, prueba del más visto al menos hasta encontrar stock. Se
+   re-aprende cada `HISTORIAL_REFRESCO_HORAS` (def. 6, hasta
+   `HISTORIAL_MAX_PAGINAS`×100 suscriptores) y cada pedido creado por el bot
+   se suma al instante. Se guarda en `DATA_DIR/historial_promos.json`.
+   `/promos_aprendidas [actualizar]` muestra la tabla en Telegram.
+
+   **Promo automática desde Chatea Pro (sin tocar código).** Un embudo
+   (`[Producto Ventas Wp] N`) que tenga entrada en el campo del bot
+   `[Promos Dropi] Reglas` se arma solo: `ID de Dropi` × `Cantidad de
+   productos`, total = `Valor de la compra`, + regalo (`upsells.1` del
+   embudo, o `regalo` en la regla). Ejemplo del campo:
+
+   ```json
+   {"148700": {"producto_por_frascos": {"1": {"id": 14235, "nombre": "Mega Red 3"}},
+               "regalo": {"id": 86248, "nombre": "Aceite Batana Oil", "precio": 8},
+               "regalo_desde": 2, "max_frascos": 6},
+    "186883": {"frascos_por_unidad": 2,
+               "regalo": {"id": 86248, "nombre": "Aceite Batana Oil", "precio": 8},
+               "regalo_desde": 4, "max_frascos": 6}}
+   ```
+
+   Si la cantidad está vacía, el valor no tiene sentido (ej. `2799` sin punto)
+   o el pedido supera `max_frascos`, la ficha lo avisa para revisarlo. Los
+   embudos sin regla siguen con `EMBUDOS` de `promos.py`. La config se lee
+   cada 10 min (`CONFIG_PROMOS_TTL_SECONDS`). Si no se puede editar el Chatea
+   Pro de la cuenta, el mismo JSON va en `DATA_DIR/reglas_promos.json`
+   (`PROMOS_REGLAS_PATH`); el archivo gana sobre el campo del bot.
 2. **Agencia**: el buscador de agencias; si la ciudad tiene varias y no
    reconoce el sector, se geocodifica la referencia del cliente ("colegio La
    Salle") con OpenStreetMap y se sugiere la agencia más cercana (con km).

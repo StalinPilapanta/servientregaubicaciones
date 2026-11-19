@@ -23,6 +23,7 @@ import dropi_pedido
 import hermes
 import ia
 import promos
+import historial
 import datos
 
 # Cache en memoria del analisis por suscriptor (para los botones).
@@ -123,13 +124,19 @@ def analizar(campos, forzar=False):
 
     # --- promo: primero reglas sobre el CRM, luego IA ---
     cliente_txt = " ".join(_lineas_cliente({"chat": chat}, n=15))
-    promo, origen, avisos_promo = promos.detectar(campos, cliente_txt)
+    # Embudos activados en Chatea Pro ([Promos Dropi] Reglas) se arman solos
+    # con ID de Dropi + cantidad + valor; el resto con las reglas de promos.py.
+    promo, origen, avisos_promo = promos.detectar_promo_venta(campos, cliente_txt)
     ia_promo = analisis_ia["promo"] if promos.valida(analisis_ia["promo"] or "") else None
     if not promo and ia_promo:
         # La IA solo desempata dentro del mismo producto que dice el CRM.
         fams = promos.familias_en(productos)
         if not fams or promos.familia(ia_promo) in fams:
             promo, origen = ia_promo, "IA (chat)"
+    elif promo and ia_promo and (promos.es_auto(promo) or promos.es_hist(promo)):
+        if abs(promos.total_promo(ia_promo) - promos.total_promo(promo)) > 0.02:
+            avisos_promo.append(f"La IA entendió {promos.descripcion(ia_promo).splitlines()[0]}; "
+                                "se usó lo del CRM.")
     elif promo and ia_promo and ia_promo != promo:
         avisos_promo.append(f"La IA entendió {ia_promo}; se usó {promo} por el CRM.")
 
@@ -663,6 +670,10 @@ def crear_pedido(a):
     res = dropi_pedido.crear(p["datos"], p["destino"])
     if res["ok"]:
         hermes.registrar(a["ns"], res)
+        try:  # el historial aprende este armado al instante
+            historial.registrar(a["ns"], a["campos"], promos.armar(a["promo"]))
+        except Exception as e:
+            print("historial: no pude registrar el pedido:", e)
         res["notificacion"] = None
         if NOTIFICAR_CLIENTE:
             ok, det = chateapro.enviar_texto(a["ns"], mensaje_cliente(a))
