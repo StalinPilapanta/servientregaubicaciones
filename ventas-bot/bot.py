@@ -337,6 +337,17 @@ def manejar_callback(cb):
                 editar_plano(chat_id, message_id, ficha.texto_ficha(a), ficha.teclado(a))
             else:
                 responder_callback(cb_id, "Esa opción ya no existe, pulsa Reanalizar", True)
+        elif accion == "rg" and len(partes) == 3:
+            a = _ficha_de(ns)
+            responder_callback(cb_id, "Cambiando el regalo...")
+            try:
+                ok = ficha.elegir_regalo(a, partes[2])
+            except Exception as e:
+                ok = False
+                print("Error eligiendo regalo:", e)
+            if not ok:
+                enviar_plano(chat_id, "⚠️ Ese regalo ya no está en la lista; pulsa Reanalizar.")
+            editar_plano(chat_id, message_id, ficha.texto_ficha(a), ficha.teclado(a))
         elif accion == "crear":
             a = _ficha_de(ns)
             motivos = ficha.bloqueos(a)

@@ -53,8 +53,12 @@ CLIENT_NAME = "ventas-bot-telegram"
 _lock = threading.RLock()
 _meta = None            # metadata del servidor de autorizacion (cache)
 _pendientes = {}        # state -> {"verifier": ..., "ts": ...}
-_session_id = None      # Mcp-Session-Id de la sesion MCP actual
+_session_id = None      # Mcp-Session-Id de la sesion MCP actual (solo si ya esta LISTA)
 _rpc_id = 0
+# Abrir sesion = initialize + notifications/initialized. Si otro hilo llama
+# tools/call entre ambos, Dropi responde "invalid during session
+# initialization": la sesion solo se publica en _session_id ya inicializada.
+_init_lock = threading.Lock()
 
 
 class AuthRequired(Exception):
@@ -251,15 +255,15 @@ def _token():
 
 # -------------------------------------------------------------- MCP (HTTP) --
 
-def _post_rpc(payload, token):
+def _post_rpc(payload, token, sid):
     h = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
         "MCP-Protocol-Version": PROTOCOL_VERSION,
     }
-    if _session_id:
-        h["Mcp-Session-Id"] = _session_id
+    if sid:
+        h["Mcp-Session-Id"] = sid
     return requests.post(MCP_URL, json=payload, headers=h, timeout=60)
 
 
@@ -278,8 +282,12 @@ def _respuesta(r, rpc_id):
     return r.json()
 
 
-def _rpc(metodo, params=None, notificacion=False, _reintento=True):
-    global _rpc_id, _session_id
+def _rpc(metodo, params=None, notificacion=False, sid=None, _reintento=True):
+    """
+    Una llamada JSON-RPC con la sesion 'sid'. Devuelve el result; en
+    "initialize" devuelve (result, session_id).
+    """
+    global _rpc_id
     with _lock:
         _rpc_id += 1
         rid = _rpc_id
@@ -289,40 +297,49 @@ def _rpc(metodo, params=None, notificacion=False, _reintento=True):
     if not notificacion:
         payload["id"] = rid
 
-    r = _post_rpc(payload, _token())
+    r = _post_rpc(payload, _token(), sid)
     if r.status_code == 401:
         if not _reintento:
             desconectar()
             raise AuthRequired("Token rechazado por el MCP")
         _refrescar()  # lanza AuthRequired si no se puede
-        if metodo != "initialize":
-            _iniciar_sesion()
-        return _rpc(metodo, params, notificacion, _reintento=False)
-    if r.status_code == 404 and _session_id and _reintento and metodo != "initialize":
-        _session_id = None  # la sesion expiro en el servidor
-        _iniciar_sesion()
-        return _rpc(metodo, params, notificacion, _reintento=False)
+        if metodo not in ("initialize", "notifications/initialized"):
+            sid = _sesion(vieja=sid)
+        return _rpc(metodo, params, notificacion, sid, _reintento=False)
+    if r.status_code == 404 and sid and _reintento and \
+            metodo not in ("initialize", "notifications/initialized"):  # _sesion ya tiene el candado
+        sid = _sesion(vieja=sid)  # la sesion expiro en el servidor
+        return _rpc(metodo, params, notificacion, sid, _reintento=False)
     if r.status_code >= 400:
         raise MCPError(f"MCP HTTP {r.status_code}: {r.text[:200]}")
     if notificacion:
         return None
-    if metodo == "initialize" and r.headers.get("Mcp-Session-Id"):
-        _session_id = r.headers["Mcp-Session-Id"]
     m = _respuesta(r, rid)
     if m.get("error"):
         raise MCPError(f"MCP error: {m['error'].get('message')}")
+    if metodo == "initialize":
+        return m.get("result") or {}, r.headers.get("Mcp-Session-Id")
     return m.get("result") or {}
 
 
-def _iniciar_sesion():
+def _sesion(vieja=None):
+    """
+    Id de una sesion MCP ya inicializada. Si 'vieja' es la sesion actual
+    (expiro o el servidor la rechazo) abre otra. Un solo hilo la abre a la vez.
+    """
     global _session_id
-    _session_id = None
-    _rpc("initialize", {
-        "protocolVersion": PROTOCOL_VERSION,
-        "capabilities": {},
-        "clientInfo": {"name": CLIENT_NAME, "version": "1.0"},
-    })
-    _rpc("notifications/initialized", notificacion=True)
+    with _init_lock:
+        if _session_id and _session_id != vieja:
+            return _session_id
+        _session_id = None
+        _, sid = _rpc("initialize", {
+            "protocolVersion": PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": {"name": CLIENT_NAME, "version": "1.0"},
+        })
+        _rpc("notifications/initialized", notificacion=True, sid=sid)
+        _session_id = sid  # recien ahora la ven los demas hilos
+        return sid
 
 
 def llamar(herramienta, argumentos=None):
@@ -331,9 +348,14 @@ def llamar(herramienta, argumentos=None):
     dict de Python (structuredContent, JSON o texto TOON parseado).
     Lanza AuthRequired si hay que (re)conectar Dropi.
     """
-    if not _session_id:
-        _iniciar_sesion()
-    res = _rpc("tools/call", {"name": herramienta, "arguments": argumentos or {}})
+    sid = _sesion()
+    params = {"name": herramienta, "arguments": argumentos or {}}
+    try:
+        res = _rpc("tools/call", params, sid=sid)
+    except MCPError as e:
+        if "initializ" not in str(e).lower():
+            raise
+        res = _rpc("tools/call", params, sid=_sesion(vieja=sid))  # sesion a medio abrir: otra
     if res.get("isError"):
         raise MCPError(_texto(res) or f"Error en {herramienta}")
     if isinstance(res.get("structuredContent"), dict):
