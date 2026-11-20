@@ -90,11 +90,18 @@ def registrar(user_ns, resultado):
 
 # ------------------------------------------------------------------ datos --
 
-def armar_datos(campos, promo_clave, agencia):
+def armar_datos(campos, promo_clave, agencia, items=None):
     """
     Arma el payload limpio para Hermes/create_order a partir de los campos de
     Chatea Pro, la promo elegida y la agencia asignada (dict de agencias.py).
+    items: productos ya armados (ej. con el regalo cambiado); si no, los de la promo.
     """
+    if items:
+        productos = [{"id": x["id"], "price": x["price"], "quantity": x["quantity"]} for x in items]
+        total = round(sum(x["price"] * x["quantity"] for x in items), 2)
+    else:
+        productos = promos.productos_dropi(promo_clave)
+        total = promos.total_promo(promo_clave)
     nombre, apellido = chateapro.separar_nombre(
         campos.get(chateapro.CAMPO_NOMBRE) or campos.get("_name")
     )
@@ -111,9 +118,9 @@ def armar_datos(campos, promo_clave, agencia):
         "city": agencia.get("ciudad") or campos.get(chateapro.CAMPO_CIUDAD, ""),
         "dir": agencias.direccion_dropi(agencia),
         "rate_type": "CON RECAUDO",
-        "products": promos.productos_dropi(promo_clave),
+        "products": productos,
         "notes": f"RETIRO EN AGENCIA: {agencia.get('nombre', '')}",
-        "total_esperado": promos.total_promo(promo_clave),
+        "total_esperado": total,
         "shop_order_id": campos.get("_user_ns", ""),
     }
 

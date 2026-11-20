@@ -307,11 +307,25 @@ def buscar_guia(numero, dias=89):
 
 # ----------------------------------------------------------------- stock --
 
-def stock(producto_id, busqueda):
+# Proveedor del que sale casi todo: de aqui se ofrecen los regalos de reemplazo.
+PROVEEDOR_PRINCIPAL = int(os.environ.get("DROPI_PROVEEDOR_PRINCIPAL", "15819"))
+# Stock minimo para ofrecer un producto como regalo de reemplazo.
+STOCK_MIN_REGALO = int(os.environ.get("STOCK_MIN_REGALO", "5"))
+# Costo minimo: deja fuera "ENVIO PRIORITARIO", "GARANTIA", "PRODUCTO GRATIS" ($0-0.10).
+COSTO_MIN_REGALO = float(os.environ.get("COSTO_MIN_REGALO", "1"))
+
+
+def _info(p):
+    return {"id": int(p["id"]), "nombre": p.get("name") or f"#{p['id']}",
+            "stock": int(p.get("stock") or 0), "proveedor": p.get("supplier_id"),
+            "costo": float(p.get("sale_price") or 0)}
+
+
+def info_producto(producto_id, busqueda):
     """
-    Stock del producto en Dropi (int) o None si no se pudo encontrar.
-    busqueda: texto, o (texto, supplier_id) cuando hay muchos productos con
-    ese nombre ("CANDELA") y el buscado no sale en la primera pagina.
+    {id, nombre, stock, proveedor, costo} del producto en Dropi, o None si no
+    aparece. busqueda: texto, o (texto, supplier_id) cuando hay muchos
+    productos con ese nombre ("CANDELA") y el buscado no sale en la 1a pagina.
     """
     texto, proveedor = busqueda if isinstance(busqueda, tuple) else (busqueda, None)
 
@@ -319,33 +333,84 @@ def stock(producto_id, busqueda):
         params = {"search": texto, "get_stock": True, "page_size": 50}
         if proveedor:
             params["supplier_id"] = proveedor
-        res = dropi_mcp.llamar("list_products", params)
-        for p in _items(res):
+        for p in _items(dropi_mcp.llamar("list_products", params)):
             if int(p.get("id") or 0) == int(producto_id):
-                return int(p.get("stock") or 0)
+                return _info(p)
         return None
-    return _cacheado(f"stock:{producto_id}", 60, cargar)
+    return _cacheado(f"prod:{producto_id}", 60, cargar)
+
+
+def stock(producto_id, busqueda):
+    """Stock del producto en Dropi (int) o None si no se pudo encontrar."""
+    i = info_producto(producto_id, busqueda)
+    return i["stock"] if i else None
+
+
+def _busqueda_de(p, busquedas):
+    """Texto de busqueda del producto: la tabla, o su nombre sin '(regalo)'."""
+    b = busquedas.get(p["id"])
+    if b:
+        return b
+    nombre = re.sub(r"\s*\(regalo\)\s*$", "", str(p.get("nombre") or "")).strip()
+    return nombre if nombre and not nombre.startswith("#") else None
+
+
+def revisar_productos(productos, busquedas):
+    """
+    productos: [{id, quantity, nombre?}]. Devuelve dict:
+      faltantes   -> textos que BLOQUEAN (sin stock, o varios proveedores)
+      lineas      -> "#148700 MEGA RED PRIV ×2 · stock 1377 ✓ · prov 15819"
+      proveedores -> proveedores encontrados
+      info        -> {id: info_producto}
+    """
+    faltantes, lineas, info = [], [], {}
+    for p in productos:
+        busq = _busqueda_de(p, busquedas)
+        i = info_producto(p["id"], busq) if busq else None
+        nombre = (i or {}).get("nombre") or p.get("nombre") or f"#{p['id']}"
+        regalo = " 🎁" if str(p.get("nombre") or "").endswith("(regalo)") else ""
+        base = f"#{p['id']} {nombre}{regalo} ×{p['quantity']}"
+        if i is None:
+            lineas.append(f"{base} · no pude verificar ⚠️")
+            continue
+        info[p["id"]] = i
+        prov = f"prov {i['proveedor']}"
+        if i["stock"] < p["quantity"]:
+            faltantes.append(f"{nombre} (#{p['id']}): hay {i['stock']}, se necesitan {p['quantity']}")
+            lineas.append(f"{base} · stock {i['stock']} ❌ · {prov}")
+        else:
+            lineas.append(f"{base} · stock {i['stock']} ✓ · {prov}")
+    proveedores = sorted({i["proveedor"] for i in info.values() if i["proveedor"]})
+    if len(proveedores) > 1:
+        faltantes.append(f"El pedido mezcla {len(proveedores)} proveedores "
+                         f"({', '.join(map(str, proveedores))}): debe ir con uno solo.")
+    return {"faltantes": faltantes, "lineas": lineas, "proveedores": proveedores, "info": info}
 
 
 def revisar_stock(productos, busquedas):
+    """Compatibilidad: (faltantes, lineas) de revisar_productos."""
+    r = revisar_productos(productos, busquedas)
+    return r["faltantes"], r["lineas"]
+
+
+def regalos_baratos(proveedor=None, excluir=(), n=3, cantidad=1):
     """
-    productos: [{id, quantity, nombre?}]. Devuelve (faltantes, lineas):
-      faltantes -> textos de productos SIN stock suficiente (bloquean)
-      lineas    -> resumen para mostrar ("Mega Red 3: 2603 ✓")
+    Los n productos mas economicos del proveedor con stock (para elegir otro
+    regalo cuando no hay el principal). Lista de info_producto.
     """
-    faltantes, lineas = [], []
-    for p in productos:
-        nombre = p.get("nombre") or busquedas.get(p["id"]) or f"#{p['id']}"
-        busq = busquedas.get(p["id"])
-        n = stock(p["id"], busq) if busq else None
-        if n is None:
-            lineas.append(f"{nombre}: no pude verificar ⚠️")
-        elif n < p["quantity"]:
-            faltantes.append(f"{nombre} (#{p['id']}): hay {n}, se necesitan {p['quantity']}")
-            lineas.append(f"{nombre}: {n} ❌")
-        else:
-            lineas.append(f"{nombre}: {n} ✓")
-    return faltantes, lineas
+    proveedor = proveedor or PROVEEDOR_PRINCIPAL
+
+    def cargar():
+        res = dropi_mcp.llamar("list_products", {
+            "supplier_id": proveedor, "get_stock": True, "page_size": 60,
+            "order_by": "sale_price", "order_type": "asc"})
+        return [_info(p) for p in _items(res)]
+    todos = _cacheado(f"baratos:{proveedor}", 600, cargar)
+    excluir = {int(x) for x in excluir}
+    ok = [i for i in sorted(todos, key=lambda i: i["costo"])
+          if i["costo"] >= COSTO_MIN_REGALO and i["id"] not in excluir
+          and i["stock"] >= max(cantidad, STOCK_MIN_REGALO)]
+    return ok[:n]
 
 
 # ---------------------------------------------------------- riesgo cliente --

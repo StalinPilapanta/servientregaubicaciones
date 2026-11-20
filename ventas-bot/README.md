@@ -203,8 +203,20 @@ Dropi** (misma sesión OAuth de `/dropi_conectar`), sin Hermes:
    El total sale de la escalera de precios del embudo y desde la promo de la
    semana se agrega el regalo sorpresa (Aceite Batana $8). Qué producto de
    Dropi se sube por cantidad se configura en `EMBUDOS`. Ej:
-   Mega Red 1 → Mega Red 3 (14235) $27.99 · Mega Red 2 → 2× 148700 $15 + Batana $8 ·
+   Mega Red: 1 → Mega Red 3 (14235; sin stock 148700/19257) $27.99 · 2 → 2×
+   148700 $15 + regalo = $37.99 o $38 (se cobra ese valor) · más
+   frascos: 3 $52 · 4 $65 · 5 $80 · 6 $97 · 7+ $15 c/u (148700 + regalo);
+   cualquier otra cosa del CRM se arma como 1 × $27.99 ·
    Drenaje 2 → 186883 $27.99 · Drenaje 4 → 2× 186883 $15 + Batana $8.
+
+   **Stock, proveedor y regalo en la ficha.** Cada ficha muestra los
+   productos que se subirán a Dropi con `#id · stock · proveedor`. El regalo
+   sorpresa de cualquier promo se sube como **Té Chino x30 (115343)**
+   (`REGALO_PRINCIPAL_ID`) al mismo precio, así el total no cambia. Si no hay
+   stock, la ficha lista los 3 productos más económicos del proveedor
+   (`DROPI_PROVEEDOR_PRINCIPAL`, def. 15819; costo ≥ `COSTO_MIN_REGALO` $1,
+   stock ≥ `STOCK_MIN_REGALO` 5) como botones para elegir. Un pedido con
+   productos de más de un proveedor no se puede crear.
 
    **Orden en que se decide la promo:** (1) lo aprendido del historial de la
    cuenta, (2) la regla automática, (3) `EMBUDOS` de este archivo. Si nada

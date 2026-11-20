@@ -6,26 +6,24 @@ Aprendido de los pedidos reales (13-16/11/2026) cruzados con el CRM:
   * Cada embudo de Chatea Pro vende UN producto y lo guarda en el campo
     "ID de Dropi" (148700 = Mega Red, 186883 = Drenaje Linfatico 2x1).
   * "Cantidad de productos" son FRASCOS que pidio el cliente.
-  * El precio sale de la escalera del embudo (campo Precios_y_ofertas):
-      Mega Red: 1 = $27.99 | 2 = $37.99 + regalo | 3 = $52 | 4 = $65 |
-                5 = $80 | 6 = $97 | 7+ = cantidad x $15
-      Drenaje:  2 frascos = $27.99 | 4 frascos = $37.99 + regalo
-  * La promo de $37.99 se sube a Dropi como $38.00 (asi se viene haciendo).
-  * Desde la promo de la semana va un REGALO SORPRESA, que se sube como
-    Aceite Batana Oil (86248) a $8 (alguna vez Turkesterone 111484).
+  * Mega Red (20/11/2026): 1 frasco = $27.99 | 2 frascos + regalo = $37.99
+    o $38 (se cobra ese valor) | mas frascos: 3 $52 | 4 $65 | 5 $80 | 6 $97 |
+    7+ $15 c/u. Cualquier otra cosa del CRM -> 1 frasco $27.99.
+  * Drenaje: 2 frascos = $27.99 | 4 frascos = $37.99 + regalo (se sube $38).
+  * El REGALO SORPRESA se sube como Te Chino x30 (115343, REGALO_PRINCIPAL).
   * El producto que se sube a Dropi NO siempre es el del CRM:
-      - Mega Red 1 frasco  -> Mega Red 3 (14235)            [16/11]
-      - Mega Red 2 frascos -> 2x MEGA RED PRIV (148700) $15 + Batana $8
+      - Mega Red 1 frasco  -> Mega Red 3 (14235); sin stock 148700 o 19257
+      - Mega Red 2 frascos -> 2x MEGA RED PRIV (148700) $15 + regalo $8 ($7.99)
       - Drenaje 2 frascos  -> 1x PROMOCION DRENAJE 2X1 (186883) $27.99
       - Drenaje 4 frascos  -> 2x PROMOCION DRENAJE 2X1 $15 + Batana $8
     Todo eso se ajusta abajo en EMBUDOS sin tocar el resto del bot.
 
-Una "promo" es una clave "<embudo>:<frascos>" (ej. "megared:2"), con
-sufijo "+batana" si el cliente pago el aceite aparte (ej. 1 Mega Red +
-Batana = $35.99).
+Una "promo" es una clave "<embudo>:<frascos>" (ej. "megared:2"). No hay
+promo "1 Mega Red + Batana": con 1 frasco solo va el producto.
 """
 
 import copy
+import os
 import re
 import unicodedata
 
@@ -35,8 +33,41 @@ TURKESTERONE = {"id": 111484, "nombre": "Turkesterone"}
 # Regalo sorpresa que se sube a Dropi y su precio dentro del total.
 REGALO = BATANA
 PRECIO_REGALO = 8.00
-# Precio del aceite cuando el cliente lo compra aparte.
-PRECIO_BATANA_EXTRA = 8.00
+
+# --------------------------------------------------- tablas comunes --
+# Van al inicio para que cualquier seccion de abajo las pueda usar.
+
+# Texto con el que se encuentra cada producto en list_products de Dropi
+# (busqueda literal por nombre) para revisar el stock antes de crear.
+BUSQUEDA_STOCK = {
+    14235: "Mega Red 3",
+    148700: "MEGA RED PRIV",
+    19257: ("MEGA RED", 15819),  # alternativa de Mega Red 1 frasco
+    186883: ("PROMOCION DRENAJE", 15819),
+    115343: ("CHINO", 15819),  # TE CHINO X30, regalo principal
+    86248: "ACEITE BATANA OIL",
+    111484: "TURKESTERONE",
+    204734: "AURELYS 35ML",
+    120461: "Her loss",
+    196169: ("DRENAJE LINFATICO 30ML X3", 15819),
+    193483: ("DRENAJE LINFATICO 30 ML", 15819),
+    202300: "Drenaje Linfatico x2",
+    # NAD y su Candela son del proveedor 15819; con el proveedor la busqueda
+    # no se pierde entre los otros "NAD"/"CANDELA" del catalogo.
+    149084: ("NAD PRO MAX", 15819),
+    175317: ("CANDELA", 15819),  # regalo de NAD 2 frascos
+    146736: "VIGORMAX",
+    107177: "BIOKIDS MORINGA X2",
+    118567: "BIOKIDS MORINGA",
+    61427: "MAGNESIUM CITRATE KIDS",
+}
+
+# Regalo sorpresa que se sube en toda promo que lleve regalo (ver es_regalo):
+# Te Chino x30, proveedor 15819. Si no hay stock, la ficha ofrece otros.
+REGALO_PRINCIPAL = {"id": int(os.environ.get("REGALO_PRINCIPAL_ID", "115343")),
+                    "nombre": os.environ.get("REGALO_PRINCIPAL_NOMBRE", "TÉ CHINO X30")}
+# Productos que, dentro de una promo con regalo, son el regalo (no se pagan).
+REGALOS_CONOCIDOS = {BATANA["id"], TURKESTERONE["id"], 175317, REGALO_PRINCIPAL["id"]}  # + Candela
 
 EMBUDOS = {
     "megared": {
@@ -48,10 +79,20 @@ EMBUDOS = {
             1: {"id": 14235, "nombre": "Mega Red 3", "frascos_por_unidad": 1},
             "defecto": {"id": 148700, "nombre": "Mega Red Priv", "frascos_por_unidad": 1},
         },
-        # frascos -> total al cliente
+        # Promos: 1 frasco $27.99 | 2 frascos + regalo $37.99 ($38). Si el
+        # cliente quiere mas: 3 $52 | 4 $65 | 5 $80 | 6 $97 | 7+ = $15 c/u.
+        # 1 y 2 frascos: productos en EMBUDOS["megared"]["alternativas"];
+        # 3+ : MEGA RED PRIV (148700) x frascos + regalo.
         "precios": {1: 27.99, 2: 38.00, 3: 52.00, 4: 65.00, 5: 80.00, 6: 97.00},
         "precio_frasco_desde_7": 15.00,
         "regalo_desde": 2,
+        # $37.99 (lo que anuncia el embudo) tambien es la promo de 2 + regalo;
+        # se cobra lo que le dijeron al cliente (ver ajustar_al_valor).
+        "precios_aceptados": {2: (37.99,)},
+        # Cualquier otra cosa del CRM (otro valor, otra cantidad) -> 1 frasco.
+        "si_no_cuadra": 1,
+        # No usa historial ni reglas de Chatea Pro: solo estas 2 promos.
+        "solo_codigo": True,
     },
     "drenaje": {
         "nombre": "Drenaje Linfatico",
@@ -134,6 +175,21 @@ EMBUDOS["drenaje"]["alternativas"] = {
     ],
 }
 
+# Mega Red 1 frasco: Mega Red 3 (14235, proveedor 18132); si no hay stock,
+# MEGA RED PRIV (148700) o MEGA RED (19257), ambos del proveedor 15819.
+EMBUDOS["megared"]["alternativas"] = {
+    1: [
+        [_it(14235, "Mega Red 3", 27.99)],
+        [_it(148700, "MEGA RED PRIV", 27.99)],
+        [_it(19257, "MEGA RED", 27.99)],
+    ],
+    # 2 frascos + regalo = $38 / $37.99 (el regalo se sube como Te Chino, ver con_regalo).
+    2: [
+        [_it(148700, "MEGA RED PRIV", 15.00, 2), _it(*_BATANA_REGALO, 8.00)],
+        [_it(19257, "MEGA RED", 15.00, 2), _it(*_BATANA_REGALO, 8.00)],
+    ],
+}
+
 for _e in EMBUDOS.values():
     if "combos" in _e:  # el total de cada combo es su precio
         _e["precios"] = {n: round(sum(x["price"] * x["quantity"] for x in c), 2)
@@ -145,29 +201,6 @@ SUELTOS = {
                 "precio": 19.99, "palabras": ("aurelys 35", "aurelys")},
     "herloss": {"nombre": "Her Loss", "id": 120461, "precio": 20.98,
                 "palabras": ("her loss", "herloss")},
-}
-
-# Texto con el que se encuentra cada producto en list_products de Dropi
-# (busqueda literal por nombre) para revisar el stock antes de crear.
-BUSQUEDA_STOCK = {
-    14235: "Mega Red 3",
-    148700: "MEGA RED PRIV",
-    186883: ("PROMOCION DRENAJE", 15819),
-    86248: "ACEITE BATANA OIL",
-    111484: "TURKESTERONE",
-    204734: "AURELYS 35ML",
-    120461: "Her loss",
-    196169: ("DRENAJE LINFATICO 30ML X3", 15819),
-    193483: ("DRENAJE LINFATICO 30 ML", 15819),
-    202300: "Drenaje Linfatico x2",
-    # NAD y su Candela son del proveedor 15819; con el proveedor la busqueda
-    # no se pierde entre los otros "NAD"/"CANDELA" del catalogo.
-    149084: ("NAD PRO MAX", 15819),
-    175317: ("CANDELA", 15819),  # regalo de NAD 2 frascos
-    146736: "VIGORMAX",
-    107177: "BIOKIDS MORINGA X2",
-    118567: "BIOKIDS MORINGA",
-    61427: "MAGNESIUM CITRATE KIDS",
 }
 
 # Catalogo de productos de Dropi que se venden en las cuentas, con su id.
@@ -250,7 +283,8 @@ def opciones(clave):
     if es_hist(clave):
         base, p = clave.partition("#")[0], _partes_hist(clave)
         n = len(_armados_hist(*p[:3])) if p else 0
-        return [f"{base}#{i}" for i in range(n)] if n > 1 else [base]
+        propias = [f"{base}#{i}" for i in range(n)] if n > 1 else [base]
+        return propias + _respaldo_codigo(p)
     base = _sin_opcion(clave)[0]
     if base in SUELTOS:
         return [base]
@@ -260,14 +294,14 @@ def opciones(clave):
 
 
 def _partes(clave):
-    """'megared:2+batana' -> ('megared', 2, True)."""
+    """'megared:2' -> ('megared', 2, extra); extra=True si trae "+batana" (ya no valida)."""
     base, _, extra = _sin_opcion(clave)[0].partition("+")
     emb, _, n = base.partition(":")
     return emb, int(n) if n.isdigit() else 0, extra == "batana"
 
 
-def _clave(embudo, frascos, batana=False):
-    return f"{embudo}:{frascos}" + ("+batana" if batana else "")
+def _clave(embudo, frascos):
+    return f"{embudo}:{frascos}"
 
 
 def valida(clave):
@@ -277,7 +311,9 @@ def valida(clave):
         return _armar_hist(clave) is not None
     if _sin_opcion(clave)[0] in SUELTOS:
         return True
-    emb, n, _ = _partes(clave)
+    emb, n, extra = _partes(clave)
+    if extra or "+" in _sin_opcion(clave)[0]:
+        return False  # "+batana" y similares ya no son promos
     return emb in EMBUDOS and n > 0 and _total_escalera(emb, n) is not None
 
 
@@ -322,18 +358,10 @@ def armar(clave):
     emb, frascos, batana = _partes(clave)
     e = EMBUDOS[emb]
     if frascos in e.get("combos", {}):
-        items = copy.deepcopy(e["combos"][frascos])
-        if batana:
-            items.append({"id": BATANA["id"], "nombre": BATANA["nombre"],
-                          "price": PRECIO_BATANA_EXTRA, "quantity": 1})
-        return items
+        return copy.deepcopy(e["combos"][frascos])
     alternativas = e.get("alternativas", {}).get(frascos)
     if alternativas:
-        items = copy.deepcopy(alternativas[min(opcion, len(alternativas) - 1)])
-        if batana:
-            items.append({"id": BATANA["id"], "nombre": BATANA["nombre"],
-                          "price": PRECIO_BATANA_EXTRA, "quantity": 1})
-        return items
+        return copy.deepcopy(alternativas[min(opcion, len(alternativas) - 1)])
     total = _total_escalera(emb, frascos)
     prod = e["producto"].get(frascos) or e["producto"]["defecto"]
     unidades = max(1, frascos // prod["frascos_por_unidad"])
@@ -350,20 +378,39 @@ def armar(clave):
         # El regalo absorbe los centavos del redondeo para que el total cuadre.
         items.append({"id": REGALO["id"], "nombre": REGALO["nombre"] + " (regalo)",
                       "price": round(total - precio_u * unidades, 2), "quantity": 1})
-    if batana:
-        items.append({"id": BATANA["id"], "nombre": BATANA["nombre"],
-                      "price": PRECIO_BATANA_EXTRA, "quantity": 1})
     return items
+
+
+def _frascos_y_regalo_desde(clave):
+    """(frascos de la venta, desde cuantos frascos esa promo lleva regalo | None)."""
+    if es_auto(clave):
+        emb, frascos, _ = _partes_auto(clave)
+        r = _regla(emb)
+        return frascos, (r["regalo_desde"] if r and r["regalo"] else None)
+    if es_hist(clave):
+        emb, frascos, _, _ = _partes_hist(clave)
+        fam = _embudo_por_id(emb)
+        return frascos, (EMBUDOS[fam].get("regalo_desde") if fam in EMBUDOS else 2)
+    base = _sin_opcion(clave)[0]
+    if base in SUELTOS:
+        return 0, None
+    emb, frascos, _ = _partes(base)
+    return frascos, EMBUDOS.get(emb, {}).get("regalo_desde")
+
+
+def lleva_regalo(clave):
+    """
+    UNICA regla del regalo: solo si los frascos llegan al minimo de la promo
+    (Mega Red desde 2, Drenaje desde 4...). Con 1 frasco nunca hay regalo, ni
+    aunque el pedido traiga otro producto.
+    """
+    frascos, desde = _frascos_y_regalo_desde(clave)
+    return bool(desde) and frascos >= desde
 
 
 def tiene_regalo(clave):
     """True si la venta lleva regalo sorpresa (promo de la semana)."""
-    if es_auto(clave) or es_hist(clave):
-        return any(x["nombre"].endswith("(regalo)") for x in armar(clave))
-    if _sin_opcion(clave)[0] in SUELTOS:
-        return False
-    emb, frascos, _ = _partes(clave)
-    return frascos >= EMBUDOS[emb]["regalo_desde"]
+    return lleva_regalo(clave) and any(es_regalo(x, clave) for x in armar(clave))
 
 
 def total_promo(clave):
@@ -388,10 +435,8 @@ def descripcion(clave):
     elif _sin_opcion(clave)[0] in SUELTOS:
         titulo = SUELTOS[_sin_opcion(clave)[0]]["nombre"]
     else:
-        emb, frascos, batana = _partes(clave)
+        emb, frascos, _ = _partes(clave)
         titulo = f"{EMBUDOS[emb]['nombre']} — {frascos} frasco{'s' if frascos > 1 else ''}"
-        if batana:
-            titulo += " + Aceite Batana"
     L = [f"{titulo} — ${total_promo(clave):.2f}"]
     for x in armar(clave):
         L.append(f"  • {x['quantity']}x {x['nombre']} (#{x['id']}, ${x['price']:.2f})")
@@ -494,20 +539,49 @@ def detectar(campos, texto_chat=""):
         avisos.append("No sé cuántos frascos pidió el cliente.")
         return None, "", avisos
 
-    batana = emb == "megared" and "batana" in _norm(escogidos) and frascos < EMBUDOS[emb]["regalo_desde"]
-    clave = _clave(emb, frascos, batana)
+    clave = _clave(emb, frascos)
     if not valida(clave):
         avisos.append(f"{EMBUDOS[emb]['nombre']}: no hay precio configurado para {frascos} frascos.")
         return None, "", avisos
-
-    total = total_promo(clave)
-    if valor is not None and abs(valor - total) > 0.02:
-        if abs(valor - total) <= _TOLERANCIA:
-            avisos.append(f"El CRM dice ${valor:.2f}; en Dropi se sube ${total:.2f} (como siempre).")
-        else:
-            avisos.append(f"⚠️ El CRM dice ${valor:.2f} pero {frascos} frascos valen ${total:.2f}. "
-                          "Revisa antes de crear.")
+    if not cuadra_valor(clave, valor):
+        return None, "", avisos  # el valor no es el de ninguna promo: se revisa a mano
     return clave, origen, avisos
+
+
+def cuadra_valor(clave, valor):
+    """True si el valor del CRM es el precio de esa promo (±$0.15) o no hay valor."""
+    valor = _a_float(valor)
+    if valor is None or abs(valor - total_promo(clave)) <= _TOLERANCIA:
+        return True
+    if es_auto(clave) or es_hist(clave):
+        return False
+    emb, frascos, _ = _partes(clave)
+    return _precio_aceptado(emb, frascos, valor)
+
+
+def _precio_aceptado(emb, frascos, valor):
+    """True si 'valor' es uno de los precios aceptados de esa promo (ej. 2 Mega Red $37.99)."""
+    vals = (EMBUDOS.get(emb, {}).get("precios_aceptados") or {}).get(frascos) or ()
+    return valor is not None and any(abs(valor - v) <= 0.02 for v in vals)
+
+
+def ajustar_al_valor(items, clave, valor):
+    """
+    Si el CRM trae un precio aceptado (2 Mega Red a $37.99), el pedido se cobra
+    ese valor: la diferencia sale del precio del regalo. Si no, items igual.
+    """
+    valor = _a_float(valor)
+    if not items or es_auto(clave) or es_hist(clave):
+        return items
+    emb, frascos, _ = _partes(clave)
+    if not _precio_aceptado(emb, frascos, valor):
+        return items
+    regalos = [x for x in items if es_regalo(x, clave)]
+    if not regalos:
+        return items
+    diff = round(valor - sum(x["price"] * x["quantity"] for x in items), 2)
+    regalos[0]["price"] = round(regalos[0]["price"] + diff / regalos[0]["quantity"], 2)
+    return items
 
 
 def detectar_promo(productos_escogidos="", valor_compra="", texto_extra=""):
@@ -691,7 +765,6 @@ def detectar_auto(campos):
 # "hist:<id embudo>:<frascos>:<valor en centavos>[#n]"; #n = n-esimo armado
 # mas visto (las alternativas se prueban en orden hasta encontrar stock).
 
-REGALOS_CONOCIDOS = {BATANA["id"], TURKESTERONE["id"], 175317, 115343}  # + Candela, Te Chino
 
 
 def es_hist(clave):
@@ -707,8 +780,12 @@ def _partes_hist(clave):
 
 def _armados_hist(emb, frascos, valor):
     import historial
+    # Sin regalo para esa cantidad (ej. 1 Mega Red), un armado que trae
+    # Batana/Candela/etc. no es una promo valida: no se aprende.
+    sin_regalo = not lleva_regalo(f"hist:{emb}:{frascos}:0")
     return [(items, n) for items, n in historial.armados(emb, frascos, valor)
-            if n >= historial.MIN_VISTOS]
+            if n >= historial.MIN_VISTOS
+            and not (sin_regalo and any(i in REGALOS_CONOCIDOS for i, _, _ in items))]
 
 
 def _nombre_producto(pid):
@@ -723,6 +800,21 @@ def _nombre_producto(pid):
     return b if isinstance(b, str) else f"#{pid}"
 
 
+def _respaldo_codigo(partes):
+    """
+    Alternativas de EMBUDOS para la misma venta (si lo aprendido no tiene
+    stock): ej. hist de Mega Red 1 frasco -> megared:1#0..#2 (14235, 148700, 19257).
+    """
+    if not partes:
+        return []
+    emb, frascos, valor = partes[:3]
+    fam = _embudo_por_id(emb)
+    clave = f"{fam}:{frascos}"
+    if fam not in EMBUDOS or not valida(clave) or abs(total_promo(clave) - valor) > _TOLERANCIA:
+        return []
+    return opciones(clave)
+
+
 def _armar_hist(clave):
     partes = _partes_hist(clave)
     if not partes:
@@ -733,7 +825,9 @@ def _armar_hist(clave):
         return None
     items, _ = arm[min(op, len(arm) - 1)]
     items = sorted(items, key=lambda x: (x[0] in REGALOS_CONOCIDOS, x[0] != emb))  # producto, luego regalo
-    return [{"id": i, "nombre": _nombre_producto(i) + (" (regalo)" if i in REGALOS_CONOCIDOS else ""),
+    con_regalo_ok = lleva_regalo(clave)
+    return [{"id": i, "nombre": _nombre_producto(i)
+             + (" (regalo)" if con_regalo_ok and i in REGALOS_CONOCIDOS else ""),
              "price": p, "quantity": q} for i, q, p in items]
 
 
@@ -752,9 +846,6 @@ def detectar_hist(campos):
     if len(arm) > 1:
         avisos.append(f"Esta cuenta lo armó de {len(arm)} formas; se usa la más frecuente "
                       "que tenga stock.")
-    total = round(sum(p * q for _, q, p in arm[0][0]), 2)
-    if abs(total - valor) > 0.02:
-        avisos.append(f"El CRM dice ${valor:.2f}; en Dropi se sube ${total:.2f} (como siempre).")
     fams = familias_en(campos.get("Productos escogidos", ""))
     propia = _embudo_por_id(emb)
     if fams and propia and propia not in fams:
@@ -770,6 +861,22 @@ def detectar_promo_venta(campos, texto_chat=""):
       2. la regla automatica si el embudo tiene [Promos Dropi] Reglas
       3. las reglas de este archivo (detectar)
     """
+    # Embudos con promos fijas (Mega Red): solo sus promos; si el CRM dice
+    # otra cosa, se arma la de por defecto (1 frasco $27.99), sin avisos.
+    fam = _embudo_por_id(campos.get("ID de Dropi"))
+    if fam in EMBUDOS and EMBUDOS[fam].get("solo_codigo"):
+        valor = _a_float(campos.get("Valor de la compra"))
+        frascos = _a_int(campos.get("Cantidad de productos"))
+        for n in (EMBUDOS[fam].get("precios_aceptados") or {}):
+            if _precio_aceptado(fam, n, valor) and frascos in (None, n):
+                return _clave(fam, n), "ID de Dropi del CRM", []
+        clave, origen, avisos = detectar(campos, texto_chat)
+        if clave:
+            return clave, origen, avisos
+        defecto = EMBUDOS[fam].get("si_no_cuadra")
+        if defecto:
+            return _clave(fam, defecto), f"{EMBUDOS[fam]['nombre']}: 1 frasco por defecto", []
+        return clave, origen, avisos
     try:
         clave, origen, avisos = detectar_hist(campos)
     except Exception as e:  # el historial es un extra: nunca bloquea la ficha
@@ -783,6 +890,42 @@ def detectar_promo_venta(campos, texto_chat=""):
         # caer a las reglas del codigo, que pueden ser de otra cuenta).
         return clave, origen, avisos
     return detectar(campos, texto_chat)
+
+
+# ----------------------------------------------------------- regalo --
+#
+# El regalo sorpresa de cualquier armado (codigo, regla o historial) se sube
+# como REGALO_PRINCIPAL (Te Chino x30, proveedor 15819), al mismo precio y
+# cantidad que traia el armado: asi el total no cambia y el pedido queda de un
+# solo proveedor. Si no hay stock, la ficha ofrece los 3 productos mas
+# economicos del proveedor (dropi_pedido.regalos_baratos) para elegir.
+
+
+
+def es_regalo(item, clave=""):
+    """True si el item es el regalo de la promo (no el producto que se paga)."""
+    if clave and not lleva_regalo(clave):
+        return False  # esa cantidad no lleva regalo: todo se paga
+    if str(item.get("nombre", "")).endswith("(regalo)"):
+        return True
+    return item["id"] in REGALOS_CONOCIDOS
+
+
+def con_regalo(items, regalo, clave=""):
+    """Copia de items con el regalo cambiado por regalo={id, nombre}."""
+    out = []
+    for x in items:
+        x = dict(x)
+        if regalo and es_regalo(x, clave):
+            x["id"], x["nombre"] = int(regalo["id"]), f"{regalo['nombre']} (regalo)"
+        out.append(x)
+    return out
+
+
+def texto_items(items):
+    """Lineas '• 2x MEGA RED PRIV (#148700, $15.00)' de una lista de items."""
+    return "\n".join(f"  • {x['quantity']}x {x['nombre']} (#{x['id']}, ${x['price']:.2f})"
+                     for x in items)
 
 
 # ---------------------------------------------------------------- IA --

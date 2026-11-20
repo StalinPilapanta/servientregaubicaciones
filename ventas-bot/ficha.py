@@ -128,6 +128,8 @@ def analizar(campos, forzar=False):
     # con ID de Dropi + cantidad + valor; el resto con las reglas de promos.py.
     promo, origen, avisos_promo = promos.detectar_promo_venta(campos, cliente_txt)
     ia_promo = analisis_ia["promo"] if promos.valida(analisis_ia["promo"] or "") else None
+    if ia_promo and not promos.cuadra_valor(ia_promo, valor):
+        ia_promo = None  # la IA tampoco puede elegir una promo con otro precio
     if not promo and ia_promo:
         # La IA solo desempata dentro del mismo producto que dice el CRM.
         fams = promos.familias_en(productos)
@@ -224,8 +226,9 @@ def analizar(campos, forzar=False):
         "opciones": opciones, "elegida": elegida,
         "dropi_existente": existente, "aviso_dropi": aviso_dropi,
         "perfil": perfil, "error_perfil": error_perfil,
-        "preparado": None,
+        "preparado": None, "regalo": None,
     }
+    _armar_productos(a)  # stock, ID y proveedor de cada producto (Dropi)
     _CACHE[ns] = a
     return a
 
@@ -363,11 +366,23 @@ def faltantes(a):
     return sorted(faltan)
 
 
+def _titulo_promo(a):
+    """'Mega Red Omega-3 Krill Oil — 2 frascos — $37.99' con el total que se cobra."""
+    titulo = promos.descripcion(a["promo"]).splitlines()[0]
+    if a.get("items"):
+        total = round(sum(x["price"] * x["quantity"] for x in a["items"]), 2)
+        titulo = re.sub(r"\$[\d.]+$", f"${total:.2f}", titulo)
+    return titulo
+
+
 def bloqueos(a):
     """Motivos por los que aun no se puede crear el pedido."""
     motivos = []
     if not a["promo"]:
         motivos.append("No se pudo determinar la promo")
+    if a.get("regalo_opciones"):
+        motivos.append(f"Sin stock del regalo {a.get('regalo_sin_stock') or ''}: elige otro abajo")
+    motivos += a.get("faltan_stock") or []
     if not a["elegida"]:
         motivos.append("No detecté agencia, revisa el chat")
     f = faltantes(a)
@@ -437,12 +452,25 @@ def texto_ficha(a):
     ]
 
     if a["promo"]:
-        L.append(f"🎁 {promos.descripcion(a['promo'])}")
+        L.append(f"🎁 {_titulo_promo(a)}")
         L.append(f"   (detectada por {a['promo_origen']})")
     else:
         L.append("🎁 Promo: no detectada")
     for av in a["avisos_promo"]:
         L.append(f"   ⚠️ {av}")
+    if a.get("stock"):
+        L += ["", "📦 Productos en Dropi (stock · proveedor):"] + [f"   {x}" for x in a["stock"]]
+    elif a.get("items"):
+        L += ["", "📦 Productos:", promos.texto_items(a["items"])]
+    if a.get("error_stock"):
+        L.append(f"   ℹ️ {a['error_stock']}")
+    if a.get("regalo_opciones"):
+        L += ["", f"🎁 No hay stock de {a.get('regalo_sin_stock')}. Más económicos del proveedor "
+                  "(elige uno abajo):"]
+        L += [f"   • #{o['id']} {o['nombre']} — costo ${o['costo']:.2f} · stock {o['stock']}"
+              for o in a["regalo_opciones"]]
+    elif a.get("regalo"):
+        L.append(f"   🎁 Regalo elegido: #{a['regalo']['id']} {a['regalo']['nombre']}")
 
     res = a["agencia_res"]
     L.append("")
@@ -506,6 +534,9 @@ def teclado(a):
         return filas
     if not bloqueos(a):
         filas.append([{"text": "✅ Crear pedido en Dropi", "callback_data": f"crear:{ns}"}])
+    for o in a.get("regalo_opciones") or []:  # regalo de reemplazo (sin stock del principal)
+        filas.append([{"text": f"🎁 {o['nombre'][:26]} · ${o['costo']:.2f} · stock {o['stock']}",
+                       "callback_data": f"rg:{ns}:{o['id']}"}])
     # Agencias para cambiar o elegir (3 sugeridas, o la ciudad completa).
     todas = a["opciones"]
     paginas = max(1, -(-len(todas) // POR_PAGINA))
@@ -569,6 +600,82 @@ def _elegir_armado(promo):
     return sin_faltantes or primera
 
 
+def _con_stock(r, items):
+    """True si todos esos items aparecen en Dropi con stock suficiente."""
+    return all(x["id"] in r["info"] and r["info"][x["id"]]["stock"] >= x["quantity"] for x in items)
+
+
+def _elegir_armado_regalo(promo, regalo):
+    """
+    Como _elegir_armado, pero con el regalo cambiado por 'regalo' y revisando
+    proveedor. Devuelve (clave, items, revision) de la primera alternativa cuyos
+    productos principales tienen stock y son de un solo proveedor (el regalo se
+    resuelve aparte: si falta, se ofrece otro).
+    """
+    candidatas = []
+    for clave in promos.opciones(promo):
+        items = promos.con_regalo(promos.armar(clave), regalo, clave)
+        r = dropi_pedido.revisar_productos(items, promos.BUSQUEDA_STOCK)
+        principales = [x for x in items if not promos.es_regalo(x, clave)]
+        candidatas.append((clave, items, r))
+        if _con_stock(r, principales) and len(r["proveedores"]) <= 1:
+            return clave, items, r
+    for c in candidatas:  # sin un solo proveedor: al menos con stock
+        if _con_stock(c[2], [x for x in c[1] if not promos.es_regalo(x, c[0])]):
+            return c
+    return candidatas[0]
+
+
+def _armar_productos(a):
+    """
+    Arma los productos de la venta con stock, ID y proveedor (llama a Dropi):
+      a["items"]           productos a subir (regalo ya cambiado)
+      a["stock"]           lineas "#id nombre ×n · stock N ✓ · prov P"
+      a["faltan_stock"]    motivos que bloquean (sin stock, varios proveedores)
+      a["regalo_opciones"] 3 productos baratos del proveedor si falta el regalo
+    """
+    a.update(items=None, stock=[], faltan_stock=[], regalo_opciones=[], error_stock="",
+             regalo_sin_stock="")
+    if not a["promo"]:
+        return
+    regalo = a.get("regalo") or promos.REGALO_PRINCIPAL
+    try:
+        clave, items, r = _elegir_armado_regalo(a["promo"], regalo)
+        # 2 Mega Red a $37.99: se cobra lo que se le dijo al cliente.
+        items = promos.ajustar_al_valor(items, clave, a["campos"].get(chateapro.CAMPO_VALOR))
+        a["promo"], a["items"], a["stock"] = clave, items, r["lineas"]
+        a["faltan_stock"] = list(r["faltantes"])
+        regalos = [x for x in items if promos.es_regalo(x, clave)]
+        if regalos and not _con_stock(r, regalos):
+            # Mismo proveedor que los productos principales (si no, el principal).
+            provs = sorted({r["info"][x["id"]]["proveedor"] for x in items
+                            if not promos.es_regalo(x, clave) and x["id"] in r["info"]})
+            prov = provs[0] if len(provs) == 1 else dropi_pedido.PROVEEDOR_PRINCIPAL
+            a["regalo_opciones"] = dropi_pedido.regalos_baratos(
+                prov, excluir=[x["id"] for x in items], cantidad=regalos[0]["quantity"])
+            a["regalo_sin_stock"] = regalos[0]["nombre"].replace(" (regalo)", "")
+            # Ese faltante lo resuelve elegir otro regalo (motivo aparte en bloqueos).
+            ids = {f"(#{x['id']})" for x in regalos}
+            a["faltan_stock"] = [f for f in a["faltan_stock"] if not any(i in f for i in ids)]
+    except dropi_mcp.AuthRequired:
+        a["items"] = promos.con_regalo(promos.armar(a["promo"]), regalo, a["promo"])
+        a["error_stock"] = "Dropi no conectado (/dropi_conectar): no pude revisar stock."
+    except Exception as e:
+        a["items"] = promos.con_regalo(promos.armar(a["promo"]), regalo, a["promo"])
+        a["error_stock"] = f"No pude revisar stock en Dropi: {_recorta(str(e), 80)}"
+
+
+def elegir_regalo(a, producto_id):
+    """Cambia el regalo por uno de a["regalo_opciones"] y vuelve a armar."""
+    for o in a.get("regalo_opciones") or []:
+        if o["id"] == int(producto_id):
+            a["regalo"] = {"id": o["id"], "nombre": o["nombre"]}
+            a["preparado"] = None
+            _armar_productos(a)
+            return True
+    return False
+
+
 def preparar(a):
     """
     Paso 1 del boton Crear: resuelve ciudad/departamento en Dropi y cotiza
@@ -585,13 +692,15 @@ def preparar(a):
             ag.get("provincia") or a["campos"].get(chateapro.CAMPO_PROVINCIA, ""))
     except dropi_pedido.DestinoError as e:
         return False, str(e)
-    clave, faltan, stock_lineas = _elegir_armado(a["promo"])
-    if faltan:
-        return False, ("SIN STOCK en Dropi: " + "; ".join(faltan)
-                       + ". Créalo a mano en Dropi (con otro producto) o espera reposición.")
-    if clave != a["promo"]:
-        a["promo"] = clave  # la confirmacion y la creacion usan este armado
-    datos = hermes.armar_datos(a["campos"], a["promo"], ag)
+    _armar_productos(a)  # stock fresco justo antes de crear
+    if a["error_stock"]:
+        return False, a["error_stock"]
+    if a["faltan_stock"]:
+        extra = (" Elige otro regalo en la ficha." if a["regalo_opciones"]
+                 else " Créalo a mano en Dropi (con otro producto) o espera reposición.")
+        return False, "No se puede armar en Dropi: " + "; ".join(a["faltan_stock"]) + extra
+    stock_lineas = a["stock"]
+    datos = hermes.armar_datos(a["campos"], a["promo"], ag, items=a["items"])
     cot = dropi_pedido.cotizar(destino, datos["products"], datos["dir"])
     if not cot["ok"]:
         return False, cot["error"] + " Si persiste, créalo a mano en Dropi."
@@ -603,14 +712,16 @@ def preparar(a):
 def texto_confirmacion(a):
     p = a["preparado"]
     d, dest, cot = p["datos"], p["destino"], p["cotizacion"]
-    total = promos.total_promo(a["promo"])
+    total = (round(sum(x["price"] * x["quantity"] for x in a["items"]), 2) if a.get("items")
+             else promos.total_promo(a["promo"]))
     L = ["📝 CONFIRMAR PEDIDO EN DROPI", "",
          f"👤 {d['name']} {d['surname']}".rstrip(),
          f"📲 {d['phone']}",
          f"🗺️ Dropi: {dest['city']} — {dest['state']} (ciudad #{dest['city_id']})",
          f"🏢 {a['elegida'].get('nombre')}",
          f"   {d['dir']}", "",
-         f"🎁 {promos.descripcion(a['promo'])}",
+         f"🎁 {_titulo_promo(a)}",
+         promos.texto_items(a["items"]),
          "",
          f"🚚 SERVIENTREGA · contra entrega · envío ${cot['costo']:.2f} {cot['moneda']}",
          f"💵 El cliente paga ${total:.2f} {cot['moneda']}",
@@ -671,7 +782,7 @@ def crear_pedido(a):
     if res["ok"]:
         hermes.registrar(a["ns"], res)
         try:  # el historial aprende este armado al instante
-            historial.registrar(a["ns"], a["campos"], promos.armar(a["promo"]))
+            historial.registrar(a["ns"], a["campos"], a.get("items") or promos.armar(a["promo"]))
         except Exception as e:
             print("historial: no pude registrar el pedido:", e)
         res["notificacion"] = None
