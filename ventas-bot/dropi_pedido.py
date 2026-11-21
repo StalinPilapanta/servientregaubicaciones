@@ -131,6 +131,9 @@ def resolver_destino(ciudad, provincia):
         "city": c.get("name"),
         "department_id": int(c.get("department_id") or 0),
         "state": dep_de(c).get("name") or provincia,
+        # Codigo del departamento (CAÑAR = "1024"): create_order acepta codigo o
+        # nombre, y con el nombre la Ñ/tildes se rompen del lado de Dropi.
+        "state_code": dep_de(c).get("code") or "",
         "dane_code": str(c.get("cod_dane") or ""),
         "zip_code": str(c.get("zip_code") or "") or None,
     }
@@ -232,7 +235,7 @@ def crear(datos, destino):
         "surname": datos["surname"] or ".",
         "phone": datos["phone"],
         "dir": datos["dir"],
-        "state": destino["state"],
+        "state": destino.get("state_code") or destino["state"],
         "city": destino["city"],
         "rate_type": "CON RECAUDO",
         "products": datos["products"],
@@ -257,7 +260,7 @@ def crear(datos, destino):
                     "total": ya.get("total"),
                     "mensaje": f"Hubo un error pero el pedido sí quedó creado ({e})."}
         return {"ok": False, "order_id": None, "guia": None, "total": None,
-                "mensaje": f"Dropi no creó el pedido: {e}. Revisa en Dropi antes de reintentar."}
+                "mensaje": explicar_error(str(e), datos, destino)}
 
     olvidar_pedidos()
     oid = None
@@ -272,6 +275,66 @@ def crear(datos, destino):
     return {"ok": True, "order_id": str(oid), "guia": None,
             "total": res.get("total") if isinstance(res, dict) else None,
             "mensaje": str(res.get("status", "")) if isinstance(res, dict) else ""}
+
+
+def arreglar_texto(s):
+    """'estÃ¡' -> 'está', 'CAÃ\\x83Â\\x91AR' -> 'CAÑAR' (UTF-8 leido como latin-1, 1 o 2 veces)."""
+    def uno(m):  # cada tramo roto por separado: puede venir roto 1 o 2 veces
+        t = m.group()
+        for _ in range(3):
+            try:
+                nuevo = t.encode("latin-1").decode("utf-8")
+            except (UnicodeEncodeError, UnicodeDecodeError):
+                break
+            if nuevo == t:
+                break
+            t = nuevo
+        return t
+    return re.sub(r"[À-ÿ][\u0080-ÿ]+", uno, str(s or ""))
+
+
+# (palabras en el error de Dropi, que fallo, que hacer)
+_TIPOS_ERROR = [
+    (("departamento", "department", "state"), "DEPARTAMENTO",
+     "Revisa en Dropi que ese departamento exista y esté habilitado; si no, crea el pedido a mano."),
+    (("ciudad", "city", "municipio", "destino", "cobertura", "coverage"), "CIUDAD / COBERTURA",
+     "Revisa la ciudad de la agencia o que Servientrega cubra ese destino."),
+    (("stock", "inventario", "agotado", "producto", "product", "variation", "variacion"), "PRODUCTO",
+     "Revisa stock y que los productos sigan activos en Dropi; pulsa Reanalizar."),
+    (("telefono", "phone", "celular"), "TELÉFONO",
+     "Corrige el teléfono del cliente en el CRM y pulsa Reanalizar."),
+    (("direccion", "address", "dir "), "DIRECCIÓN",
+     "Revisa la dirección / agencia del pedido."),
+    (("saldo", "wallet", "balance", "cartera"), "SALDO DE DROPI",
+     "Recarga saldo en Dropi y vuelve a intentar."),
+    (("transportadora", "carrier", "distribution"), "TRANSPORTADORA",
+     "Revisa que Servientrega esté disponible para esa ruta en Dropi."),
+]
+
+
+def explicar_error(texto, datos=None, destino=None):
+    """Mensaje claro de por que Dropi no creo el pedido (que fallo + que hacer)."""
+    detalle = arreglar_texto(texto)
+    detalle = re.sub(r"^(MCP error:\s*)?(core rejected the request:\s*)?", "", detalle,
+                     flags=re.I).strip()
+    bajo = _norm(detalle).lower() + " "
+    destino, datos = destino or {}, datos or {}
+    for palabras, que, accion in _TIPOS_ERROR:
+        if any(p in bajo for p in palabras):
+            break
+    else:
+        que, accion = "OTRO", "Revisa el detalle en Dropi."
+    dato = {
+        "DEPARTAMENTO": f"«{destino.get('state', '?')}» (código {destino.get('state_code') or '-'})",
+        "CIUDAD / COBERTURA": f"«{destino.get('city', '?')}» — {destino.get('state', '?')}",
+        "PRODUCTO": ", ".join(f"#{p['id']} ×{p['quantity']}" for p in datos.get("products") or []),
+        "TELÉFONO": datos.get("phone", ""),
+        "DIRECCIÓN": datos.get("dir", ""),
+    }.get(que, "")
+    L = [f"📍 Falló: {que}" + (f" {dato}" if dato else ""),
+         f"💬 Dropi dice: {detalle[:300]}",
+         f"👉 {accion}"]
+    return "\n".join(L)
 
 
 # ------------------------------------------------------- consultas (bot) --

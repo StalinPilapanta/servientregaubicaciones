@@ -66,6 +66,10 @@ BUSQUEDA_STOCK = {
 # Te Chino x30, proveedor 15819. Si no hay stock, la ficha ofrece otros.
 REGALO_PRINCIPAL = {"id": int(os.environ.get("REGALO_PRINCIPAL_ID", "115343")),
                     "nombre": os.environ.get("REGALO_PRINCIPAL_NOMBRE", "TÉ CHINO X30")}
+# Productos que en Dropi SON un regalo ("PRODUCTO GRATIS" 61592, agotado):
+# siempre se cambian por REGALO_PRINCIPAL, venga de donde venga el armado
+# (historial aprendido incluido) y sin importar la cantidad.
+REGALOS_EXPLICITOS = {61592}
 # Productos que, dentro de una promo con regalo, son el regalo (no se pagan).
 REGALOS_CONOCIDOS = {BATANA["id"], TURKESTERONE["id"], 175317, REGALO_PRINCIPAL["id"]}  # + Candela
 
@@ -409,8 +413,8 @@ def lleva_regalo(clave):
 
 
 def tiene_regalo(clave):
-    """True si la venta lleva regalo sorpresa (promo de la semana)."""
-    return lleva_regalo(clave) and any(es_regalo(x, clave) for x in armar(clave))
+    """True si la venta lleva regalo sorpresa (promo de la semana o producto gratis)."""
+    return any(es_regalo(x, clave) for x in armar(clave))
 
 
 def total_promo(clave):
@@ -826,9 +830,14 @@ def _armar_hist(clave):
     items, _ = arm[min(op, len(arm) - 1)]
     items = sorted(items, key=lambda x: (x[0] in REGALOS_CONOCIDOS, x[0] != emb))  # producto, luego regalo
     con_regalo_ok = lleva_regalo(clave)
-    return [{"id": i, "nombre": _nombre_producto(i)
-             + (" (regalo)" if con_regalo_ok and i in REGALOS_CONOCIDOS else ""),
-             "price": p, "quantity": q} for i, q, p in items]
+    out = []
+    for i, q, p in items:
+        nombre = _nombre_producto(i)
+        regalo = (i in REGALOS_CONOCIDOS and con_regalo_ok) or \
+            es_regalo_explicito({"id": i, "nombre": nombre})
+        out.append({"id": i, "nombre": nombre + (" (regalo)" if regalo else ""),
+                    "price": p, "quantity": q})
+    return out
 
 
 def detectar_hist(campos):
@@ -904,11 +913,19 @@ def detectar_promo_venta(campos, texto_chat=""):
 
 def es_regalo(item, clave=""):
     """True si el item es el regalo de la promo (no el producto que se paga)."""
+    if es_regalo_explicito(item):
+        return True  # "PRODUCTO GRATIS": siempre es regalo
     if clave and not lleva_regalo(clave):
         return False  # esa cantidad no lleva regalo: todo se paga
     if str(item.get("nombre", "")).endswith("(regalo)"):
         return True
     return item["id"] in REGALOS_CONOCIDOS
+
+
+def es_regalo_explicito(item):
+    """El producto mismo es un regalo en Dropi: 61592 o un nombre con 'GRATIS'."""
+    nombre = _norm(str(item.get("nombre", "")).replace("(regalo)", ""))
+    return item["id"] in REGALOS_EXPLICITOS or bool(re.search(r"\bgratis\b", nombre))
 
 
 def con_regalo(items, regalo, clave=""):
