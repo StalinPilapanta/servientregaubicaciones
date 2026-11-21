@@ -118,6 +118,22 @@ def listar_todos_suscriptores(max_paginas=10):
     return todos
 
 
+def _campos_de_lista(s):
+    """
+    Campos de un suscriptor tal como vienen en /subscribers (ya traen
+    user_fields): evita una peticion /subscriber/get-info por cada uno, que
+    hacia lentisimo el /resumen y /ventas de fechas pasadas (hasta 1000).
+    """
+    if "user_fields" not in s:
+        return obtener_campos(s["user_ns"])
+    campos = {f.get("name", ""): str(f.get("value") or "") for f in s.get("user_fields") or []}
+    campos["_name"] = s.get("name") or ""
+    campos["_phone"] = s.get("phone") or ""
+    campos["_user_ns"] = s["user_ns"]
+    _CACHE[s["user_ns"]] = {"campos": campos, "ts": time.time()}
+    return campos
+
+
 def obtener_campos(user_ns, fresco=False):
     """
     Devuelve un dict {nombre_campo: valor} de un suscriptor (con cache).
@@ -309,7 +325,7 @@ def ventas_del_dia(fecha=None):
 
     ventas = []
     for s in suscriptores:
-        campos = obtener_campos(s["user_ns"])
+        campos = _campos_de_lista(s)
         if es_venta_de_fecha(campos, fecha):
             ventas.append(campos)
     # Ordenar de la venta mas antigua a la mas nueva (por fecha+ hora de compra).

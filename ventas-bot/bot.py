@@ -557,29 +557,41 @@ def autorizado(chat_id):
     return str(chat_id) in ALLOWED
 
 
+class FechaInvalida(ValueError):
+    """El comando trae una fecha que no se entiende (se avisa en vez de usar hoy)."""
+
+
 def _parse_arg_fecha(texto):
     """
-    Extrae una fecha del comando: 'ayer' o 'dd/mm/aaaa'.
-    Si no hay argumento, devuelve None (=> hoy en Ecuador).
+    Fecha del comando: 'hoy', 'ayer', 'dd/mm/aaaa', 'dd/mm/aa', 'dd-mm-aaaa' o
+    'dd/mm' (año actual). Sin argumento -> None (= hoy en Ecuador).
+    Si el argumento no es una fecha valida lanza FechaInvalida.
     """
-    import re
-    import datetime as dt
     partes = texto.split(maxsplit=1)
     if len(partes) < 2:
         return None
     arg = partes[1].strip().lower()
-    if arg == "ayer":
-        return chateapro.hoy_ecuador() - dt.timedelta(days=1)
+    hoy = chateapro.hoy_ecuador()
     if arg in ("hoy", ""):
         return None
-    m = re.search(r"(\d{1,2})/(\d{1,2})/(\d{4})", arg)
-    if m:
-        d, mo, y = map(int, m.groups())
-        try:
-            return dt.date(y, mo, d)
-        except ValueError:
-            return None
-    return None
+    if arg == "ayer":
+        return hoy - dt.timedelta(days=1)
+    m = re.search(r"\b(\d{1,2})[/\-.](\d{1,2})(?:[/\-.](\d{2}|\d{4}))?\b", arg)
+    if not m:
+        raise FechaInvalida(f"No entendí la fecha «{partes[1].strip()}». "
+                            "Usa dd/mm/aaaa, por ejemplo: /resumen 17/11/2026")
+    d, mo = int(m.group(1)), int(m.group(2))
+    y = m.group(3)
+    y = hoy.year if y is None else (2000 + int(y) if len(y) == 2 else int(y))
+    try:
+        fecha = dt.date(y, mo, d)
+    except ValueError:
+        raise FechaInvalida(f"La fecha «{partes[1].strip()}» no existe.")
+    if m.group(3) is None and fecha > hoy:
+        fecha = fecha.replace(year=y - 1)  # "28/12" en enero = diciembre pasado
+    if fecha > hoy:
+        raise FechaInvalida(f"La fecha {fecha:%d/%m/%Y} todavía no llega.")
+    return fecha
 
 
 _COMANDOS = (
@@ -599,6 +611,13 @@ def _normalizar_cmd(cmd):
 
 
 def manejar_comando(chat_id, texto):
+    try:
+        return _manejar_comando(chat_id, texto)
+    except FechaInvalida as e:  # /resumen 32/13/26 -> aviso, no el dia de hoy
+        enviar_plano(chat_id, f"⚠️ {e}")
+
+
+def _manejar_comando(chat_id, texto):
     texto = (texto or "").strip()
     cmd = _normalizar_cmd(texto.split()[0].lower()) if texto else ""
 
@@ -726,10 +745,12 @@ def manejar_comando(chat_id, texto):
         enviar(chat_id, "⏳ Buscando pedidos...")
         try:
             ventas = chateapro.ventas_del_dia(fecha)
+            dia = f"del {fecha:%d/%m/%Y}" if fecha else "de hoy"
             if not ventas:
-                enviar(chat_id, "No hay ventas registradas hoy todavía.")
+                enviar(chat_id, f"No hay ventas registradas {dia}." if fecha
+                       else "No hay ventas registradas hoy todavía.")
                 return
-            lineas = [f"🧾 *Pedidos de hoy ({len(ventas)})*\n"]
+            lineas = [f"🧾 *Pedidos {dia} ({len(ventas)})*\n"]
             for i, v in enumerate(ventas, 1):
                 nombre = v.get(chateapro.CAMPO_NOMBRE) or v.get("_name") or "-"
                 tel = v.get("_phone", "-")
