@@ -929,14 +929,19 @@ def es_regalo_explicito(item):
 
 
 def con_regalo(items, regalo, clave=""):
-    """Copia de items con el regalo cambiado por regalo={id, nombre}."""
+    """
+    Copia de items con el regalo cambiado por regalo={id, nombre}, y en orden:
+    primero lo que pidio el cliente y el obsequio AL FINAL (Dropi muestra el
+    primer producto como el principal del envio).
+    """
     out = []
     for x in items:
         x = dict(x)
         if regalo and es_regalo(x, clave):
             x["id"], x["nombre"] = int(regalo["id"]), f"{regalo['nombre']} (regalo)"
         out.append(x)
-    return out
+    # Producto principal (el de mas valor) primero; el obsequio siempre ultimo.
+    return sorted(out, key=lambda x: (es_regalo(x, clave), -x["price"] * x["quantity"]))
 
 
 def texto_items(items):
