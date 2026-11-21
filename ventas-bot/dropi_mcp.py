@@ -269,6 +269,10 @@ def _post_rpc(payload, token, sid):
 
 def _respuesta(r, rpc_id):
     """Extrae el mensaje JSON-RPC con ese id (respuesta JSON o SSE)."""
+    # Dropi manda "text/event-stream" sin charset y requests asume ISO-8859-1:
+    # "CAÑAR" llegaba como "CAÃ\x91AR" y asi se mandaba despues a create_order.
+    # SSE y JSON son siempre UTF-8.
+    r.encoding = "utf-8"
     if "text/event-stream" in r.headers.get("Content-Type", ""):
         for linea in r.text.splitlines():
             if linea.startswith("data:"):

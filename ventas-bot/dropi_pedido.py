@@ -131,8 +131,7 @@ def resolver_destino(ciudad, provincia):
         "city": c.get("name"),
         "department_id": int(c.get("department_id") or 0),
         "state": dep_de(c).get("name") or provincia,
-        # Codigo del departamento (CAÑAR = "1024"): create_order acepta codigo o
-        # nombre, y con el nombre la Ñ/tildes se rompen del lado de Dropi.
+        # Solo para mostrar en errores (create_order NO acepta el codigo).
         "state_code": dep_de(c).get("code") or "",
         "dane_code": str(c.get("cod_dane") or ""),
         "zip_code": str(c.get("zip_code") or "") or None,
@@ -235,7 +234,7 @@ def crear(datos, destino):
         "surname": datos["surname"] or ".",
         "phone": datos["phone"],
         "dir": datos["dir"],
-        "state": destino.get("state_code") or destino["state"],
+        "state": destino["state"],  # nombre: Dropi rechaza el codigo (1024) en create_order
         "city": destino["city"],
         "rate_type": "CON RECAUDO",
         "products": datos["products"],
