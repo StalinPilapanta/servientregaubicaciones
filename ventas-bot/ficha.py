@@ -626,6 +626,40 @@ def _elegir_armado_regalo(promo, regalo):
     return candidatas[0]
 
 
+def _respetar_costos(items, info):
+    """
+    Dropi rechaza un producto con precio menor a su costo de proveedor (ej. Te
+    Chino a $0.10 cuando cuesta $2.00, por heredar el precio del 61592). Sube
+    cada uno a su costo y resta la diferencia de los productos con margen,
+    sin cambiar el total que paga el cliente. info = {id: {"costo": ...}}.
+    """
+    items = [dict(x) for x in items]
+    total = round(sum(x["price"] * x["quantity"] for x in items), 2)
+    costo = lambda x: float((info.get(x["id"]) or {}).get("costo") or 0)
+    for x in items:
+        falta = round((costo(x) - x["price"]) * x["quantity"], 2)
+        if falta <= 0:
+            continue
+        x["price"] = costo(x)
+        # Primero los de 1 unidad (el centavo cuadra exacto), con mas margen.
+        for y in sorted((y for y in items if y is not x),
+                        key=lambda y: (y["quantity"] != 1, -(y["price"] - costo(y)))):
+            margen = round((y["price"] - costo(y)) * y["quantity"], 2)
+            if margen <= 0 or falta <= 0:
+                continue
+            quita = min(falta, margen)
+            y["price"] = round(y["price"] - quita / y["quantity"], 2)
+            falta = round(falta - quita, 2)
+    # Centavos de redondeo: al producto de 1 unidad con mas margen.
+    dif = round(total - sum(x["price"] * x["quantity"] for x in items), 2)
+    if dif:
+        unos = sorted((x for x in items if x["quantity"] == 1),
+                      key=lambda x: -(x["price"] - costo(x)))
+        if unos:
+            unos[0]["price"] = round(unos[0]["price"] + dif, 2)
+    return items
+
+
 def _armar_productos(a):
     """
     Arma los productos de la venta con stock, ID y proveedor (llama a Dropi):
@@ -643,6 +677,7 @@ def _armar_productos(a):
         clave, items, r = _elegir_armado_regalo(a["promo"], regalo)
         # 2 Mega Red a $37.99: se cobra lo que se le dijo al cliente.
         items = promos.ajustar_al_valor(items, clave, a["campos"].get(chateapro.CAMPO_VALOR))
+        items = _respetar_costos(items, r["info"])
         a["promo"], a["items"], a["stock"] = clave, items, r["lineas"]
         a["faltan_stock"] = list(r["faltantes"])
         regalos = [x for x in items if promos.es_regalo(x, clave)]

@@ -298,6 +298,9 @@ _TIPOS_ERROR = [
      "Revisa en Dropi que ese departamento exista y esté habilitado; si no, crea el pedido a mano."),
     (("ciudad", "city", "municipio", "destino", "cobertura", "coverage"), "CIUDAD / COBERTURA",
      "Revisa la ciudad de la agencia o que Servientrega cubra ese destino."),
+    (("precio", "price", "monto a ganar"), "PRECIO",
+     "Un producto quedó por debajo de su costo o el pedido no deja ganancia; pulsa "
+     "Reanalizar (el bot reparte el precio respetando costos) o ajusta el valor."),
     (("stock", "inventario", "agotado", "producto", "product", "variation", "variacion"), "PRODUCTO",
      "Revisa stock y que los productos sigan activos en Dropi; pulsa Reanalizar."),
     (("telefono", "phone", "celular"), "TELÉFONO",
@@ -327,6 +330,8 @@ def explicar_error(texto, datos=None, destino=None):
         "DEPARTAMENTO": f"«{destino.get('state', '?')}» (código {destino.get('state_code') or '-'})",
         "CIUDAD / COBERTURA": f"«{destino.get('city', '?')}» — {destino.get('state', '?')}",
         "PRODUCTO": ", ".join(f"#{p['id']} ×{p['quantity']}" for p in datos.get("products") or []),
+        "PRECIO": ", ".join(f"#{p['id']} ×{p['quantity']} a ${float(p['price']):.2f}"
+                            for p in datos.get("products") or []),
         "TELÉFONO": datos.get("phone", ""),
         "DIRECCIÓN": datos.get("dir", ""),
     }.get(que, "")
