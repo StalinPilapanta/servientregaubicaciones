@@ -31,8 +31,8 @@ Variables de entorno:
   SCAN_DELAY_SECONDS     pausa (seg) entre peticiones en barridos masivos (def. 2.0)
   RETIROS_DB_PATH        ruta del archivo retiros.json (caché de fecha de retiro)
   RETIROS_HISTORICO_PATH ruta del historico de guias en retiro (no perder data)
-  OPENAI_API_KEY         clave de OpenAI (promo + ubicacion desde el chat)
-  OPENAI_MODEL           modelo (def. gpt-4o-mini)
+  IA_MODELO              modelo de Claude para la ficha (promo + ubicacion desde el
+                         chat; def. claude-opus-5-5), usa ANTHROPIC_API_KEY, ver ia.py
   ANTHROPIC_API_KEY      asistente conversacional (texto libre y audios), ver asistente.py
   GROQ_API_KEY           transcripcion de notas de voz (o OPENAI_API_KEY), ver transcribir.py
   HORA_ALERTAS           novedades + recordatorio de retiro diarios (def. 09:00), ver alertas.py

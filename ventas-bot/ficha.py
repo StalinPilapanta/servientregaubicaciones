@@ -1,9 +1,9 @@
 """
-Ficha de venta: une Chatea Pro + OpenAI + servicio de agencias + Dropi (MCP).
+Ficha de venta: une Chatea Pro + Claude + servicio de agencias + Dropi (MCP).
 
 Flujo por cada venta:
   1. valida los datos del CRM (campos de usuario de Chatea Pro)
-  2. lee el chat y le pide a OpenAI la promo y la ubicacion de retiro
+  2. lee el chat y le pide a Claude (ia.py) la promo y la ubicacion de retiro
   3. consulta el servicio de agencias con esa ubicacion
   4. arma el texto de la ficha y los botones de Telegram
   5. al pulsar "Crear" arma el resumen (ciudad/departamento Dropi + cotizacion
