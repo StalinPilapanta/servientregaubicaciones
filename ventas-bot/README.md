@@ -134,7 +134,9 @@ El bot guarda dos archivos locales:
 | `ASISTENTE_MODELO` | Modelo del asistente (def. `claude-haiku-5-5`) |
 | `ASISTENTE_ESFUERZO` | `low` (def.), `medium` o `high` |
 | `GROQ_API_KEY` | Transcripción de audios con Groq Whisper (se usa primero) |
-| `OPENAI_API_KEY` | Transcripción de audios con OpenAI si no hay Groq (y análisis IA de la ficha) |
+| `OPENAI_API_KEY` | Transcripción de audios con OpenAI si no hay Groq |
+| `IA_MODELO` | Modelo de Claude para el análisis IA de la ficha (def. `claude-opus-5-5`; `claude-haiku-5-5` es más económico). Usa `ANTHROPIC_API_KEY` |
+| `IA_ESFUERZO` | Esfuerzo de razonamiento del análisis de la ficha (def. `low`) |
 | `TRANSCRIPCION_MODELO` | Cambia el modelo de transcripción (opcional) |
 | `RIESGO_DEVOLUCION_MIN` | % de devolución desde el que la ficha alerta (def. 30) |
 | `ALERTAS_DIARIAS` | `true` (def.) / `false`: novedades + recordatorios diarios |
